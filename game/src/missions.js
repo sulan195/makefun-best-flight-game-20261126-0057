@@ -1,337 +1,279 @@
-// FILE: game/src/missions.js
+// Ember Isles — the three missions.
+//
+// A mission is a small state machine the game ticks every frame. It watches
+// the physics events (ring passes, liftoff, touchdowns, crashes) plus the
+// plane's position, keeps the score, and reports back as a list of feedback
+// items the game turns into popups. Nothing here renders or touches the DOM.
+//
+// The three missions:
+//   Ring Race — thread six burning rings in order. Each ring is worth 250.
+//     Passing one out of order earns nothing and flashes WRONG WAY.
+//   Precision Landing — take off, fly the circuit, come back and land on
+//     RWY 09. The landing score comes from the touchdown event the physics
+//     step already measured (never recomputed afterwards, when the vertical
+//     speed has already been reset to zero): base 100 plus eight times the
+//     event's quality score. A hard landing still counts, for the base only.
+//   Canyon Run — a time trial with a supply drop. Press X over the marked
+//     drop zone to deliver (+300), then bring the plane home to the runway.
+//     Landing home within two minutes earns a +500 time bonus.
+//
+// A mission fails when the plane crashes, runs out of fuel in the air, or
+// spends more than thirty seconds outside the islands.
+
 import { CONFIG } from './config.js';
-import { checkRingPass, checkCrash, checkRunwayTouchdown } from './aircraft.js';
+
+const RING_POINTS = CONFIG.scoring.ringPoints;
+const LANDING_BASE = CONFIG.scoring.landingBase;
+const DROP_POINTS = 300;
+const DROP_RADIUS = 50;
+const TIME_BONUS_SECONDS = 120;
+const TIME_BONUS_POINTS = 500;
+const OUT_OF_BOUNDS_SECONDS = 30;
+const CIRCUIT_DISTANCE = 300;
+const WRONG_WAY_SECONDS = 2;
 
 export const MISSIONS = [
   {
     id: 'rings',
     name: 'Ring Race',
-    desc: 'Fly through all 6 rings in order for points and a speed bonus.',
+    desc: 'Thread six burning rings, go! Fastest clean run wins the day.',
   },
   {
     id: 'landing',
     name: 'Precision Landing',
-    desc: 'Take off, fly a circuit around the bay, and grease a runway landing.',
+    desc: 'Land on RWY 09, dead centre! Soft, slow, and straight wins.',
   },
   {
     id: 'canyon',
     name: 'Canyon Run',
-    desc: 'Thread all 6 rings at low level and press X over the supply drop zone.',
+    desc: 'Canyon race, supply drop run. Beat the clock home to RWY 09.',
   },
 ];
 
-const bestScores = { rings: 0, landing: 0, canyon: 0 };
-let dropKeyLatch = false;
-
-if (typeof window !== 'undefined' && window.addEventListener) {
-  window.addEventListener('keydown', (e) => {
-    if (!e.repeat && (e.code === 'KeyX' || e.key === 'x' || e.key === 'X')) {
-      dropKeyLatch = true;
-    }
-  });
-}
-
-function updateBest(ms) {
-  if (ms.score > (bestScores[ms.id] || 0)) {
-    bestScores[ms.id] = ms.score;
-  }
-  ms.best = bestScores[ms.id] || 0;
-}
-
+// Where the canyon drop goes: a fixed point out from the runway, on the
+// ground below. The height lookup is guarded — a missing height falls back
+// to sea level instead of poisoning the zone with NaN.
 function computeDropZone(world) {
-  if (world?.dropZone) {
-    return { ...world.dropZone, r: world.dropZone.r || 140, dropped: false };
+  const runway = (world && world.runway) || {};
+  const cx = Number.isFinite(runway.cx) ? runway.cx : 0;
+  const cz = Number.isFinite(runway.cz) ? runway.cz : 0;
+  const x = cx + 650;
+  const z = cz - 350;
+  let y = 0;
+  if (world && typeof world.heightAt === 'function') {
+    const ground = world.heightAt(x, z);
+    y = Number.isFinite(ground) ? ground : 0;
   }
-  const rings = world?.rings || [];
-  const last = rings[rings.length - 1];
-  const vx = world?.volcano?.x ?? 600;
-  const vz = world?.volcano?.z ?? -900;
-  const x = last ? last.x * 0.65 + vx * 0.2 : vx - 240;
-  const z = last ? last.z * 0.65 + vz * 0.2 : vz + 220;
-  const h = world?.heightAt ? world.heightAt(x, z) : undefined;
-  const ground = Number.isFinite(h) ? Math.max(0, h) : 12;
-  return { x, y: ground + 4, z, r: 140, dropped: false };
+  return { x, y, z };
+}
+
+function horizontalDistance(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return Math.sqrt(dx * dx + dz * dz);
 }
 
 export function createMissionState(id, world) {
   const def = MISSIONS.find((m) => m.id === id) || MISSIONS[0];
-  const rings = Array.isArray(world?.rings) ? world.rings : [];
-  for (let i = 0; i < rings.length; i++) {
-    rings[i].passed = false;
-  }
-  dropKeyLatch = false;
-  const ringsTotal = rings.length || 6;
-
-  return {
+  const ringsTotal = world && Array.isArray(world.rings)
+    ? world.rings.length
+    : CONFIG.world.ringCount;
+  const ms = {
     id: def.id,
-    name: def.name,
-    ringsTotal,
-    ringsLeft: def.id === 'landing' ? 0 : ringsTotal,
+    phase: def.id === 'landing' ? 'takeoff' : 'flying',
     nextRingIndex: 0,
-    startTime: 0,
-    elapsed: 0,
+    ringsTotal,
     score: 0,
-    baseScore: 0,
-    bonusScore: 0,
     done: false,
     failed: false,
     reason: '',
-    best: bestScores[def.id] || 0,
-    phase: 'takeoff',
-    maxCircuitDist: 0,
-    wasOnGround: true,
+    elapsed: 0,
     outOfBoundsTime: 0,
-    oobWarned: false,
     wrongWayCooldown: 0,
+    wasOnGround: false,
     dropZone: def.id === 'canyon' ? computeDropZone(world) : null,
     dropDelivered: false,
   };
-}
-
-function stepOrderedRings(ms, plane, world, events, ringPts, out) {
-  const rings = Array.isArray(world?.rings) ? world.rings : [];
-  if (rings.length === 0 || ms.nextRingIndex >= rings.length) return;
-
-  for (let i = 0; i < rings.length; i++) {
-    if (i < ms.nextRingIndex) {
-      rings[i].passed = true;
-      continue;
-    }
-    const r = rings[i];
-    const hitByEvent =
-      Array.isArray(events) &&
-      events.some((e) => e.type === 'ring' && (e.ring === r || e.index === i));
-    const hitNow = Boolean(r.passed) || hitByEvent || Boolean(checkRingPass(plane, r));
-
-    if (!hitNow) continue;
-    if (i === ms.nextRingIndex) {
-      r.passed = true;
-      ms.nextRingIndex += 1;
-      ms.ringsLeft = Math.max(0, rings.length - ms.nextRingIndex);
-      ms.score += ringPts;
-      ms.baseScore += ringPts;
-      out.push({
-        type: 'missionScore',
-        points: ringPts,
-        text: 'RING ' + ms.nextRingIndex + '/' + rings.length + ' +' + ringPts,
-      });
-    } else {
-      r.passed = false;
-      if (ms.wrongWayCooldown <= 0) {
-        ms.wrongWayCooldown = 2.0;
-        out.push({
-          type: 'missionScore',
-          points: 0,
-          text: 'WRONG WAY',
-        });
-      }
-    }
+  // The canyon drop is attempted two ways: the game calls this directly
+  // when the player presses X, and updateMission calls it when it sees a
+  // drop event or a fresh X press. Both paths share tryDrop, which only
+  // ever delivers once, so the two can never double-award.
+  if (def.id === 'canyon') {
+    ms.drop = (plane, w) => tryDrop(ms, plane, w || world);
   }
+  return ms;
 }
 
-function isOnRunwayBounds(plane, world) {
-  const rw = world?.runway || { cx: 0, cz: 0, headingDeg: 90, len: 420, wid: 26 };
-  const rad = ((rw.headingDeg ?? 90) * Math.PI) / 180;
-  const fwdX = Math.sin(rad);
-  const fwdZ = -Math.cos(rad);
-  const rightX = Math.cos(rad);
-  const rightZ = Math.sin(rad);
-  const dx = plane.pos.x - (rw.cx ?? 0);
-  const dz = plane.pos.z - (rw.cz ?? 0);
-  const along = Math.abs(dx * fwdX + dz * fwdZ);
-  const across = Math.abs(dx * rightX + dz * rightZ);
-  return along <= (rw.len || 420) * 0.56 && across <= (rw.wid || 26) * 0.85;
+// Try to deliver the canyon supply drop. True only when the plane is over
+// the zone and the drop has not been delivered yet.
+function tryDrop(ms, plane, world) {
+  if (!ms || ms.id !== 'canyon' || ms.dropDelivered) return false;
+  if (!ms.dropZone || !plane || !plane.pos) return false;
+  const distance = horizontalDistance(plane.pos.x, plane.pos.z, ms.dropZone.x, ms.dropZone.z);
+  if (distance > DROP_RADIUS) return false;
+  ms.dropDelivered = true;
+  ms.score += DROP_POINTS;
+  return true;
+}
+
+function failMission(ms, out, reason) {
+  if (ms.failed || ms.done) return;
+  ms.failed = true;
+  ms.reason = reason;
+  out.push({ type: 'missionFail', text: reason });
+}
+
+function completeMission(ms, out, text) {
+  if (ms.done || ms.failed) return;
+  ms.done = true;
+  out.push({ type: 'missionDone', text });
 }
 
 export function updateMission(ms, plane, world, events, dt, input) {
   const out = [];
-  if (!ms || !plane || ms.done || ms.failed) return out;
-
-  const stepDt = Math.max(0, Number(dt) || 0);
-  ms.elapsed += stepDt;
-  if (ms.wrongWayCooldown > 0) ms.wrongWayCooldown = Math.max(0, ms.wrongWayCooldown - stepDt);
-
-  const evs = Array.isArray(events) ? events : [];
-  const ringPts = CONFIG.scoring?.ringPoints ?? CONFIG.ringPoints ?? 250;
-  const landingBase = CONFIG.scoring?.landingBase ?? CONFIG.landingBase ?? 100;
-  const worldSize = world?.size ?? CONFIG.world?.size ?? CONFIG.worldSize ?? 4000;
-  const halfWorld = worldSize * 0.5;
-
-  // Only a fatal 'crash' impact fails the mission. checkCrash also returns
-  // 'hardLanding' for survivable contact (e.g. taxiing on grass, or a rough
-  // touchdown the physics layer already converted into damage) — that must
-  // NOT be treated as a crash, or an emergency landing could never survive.
-  const impact = world ? checkCrash(plane, world) : null;
-  const crashed =
-    evs.some((e) => e.type === 'crash') ||
-    (impact && impact.type === 'crash') ||
-    (plane.damage ?? 0) >= 100;
-  if (crashed) {
-    ms.failed = true;
-    ms.reason = 'Crashed';
-    out.push({ type: 'missionFail', points: 0, text: 'CRASHED!' });
-    dropKeyLatch = false;
-    return out;
+  if (!ms || ms.done || ms.failed) return out;
+  const step = typeof dt === 'number' && dt > 0 ? dt : 0;
+  ms.elapsed += step;
+  if (ms.wrongWayCooldown > 0) {
+    ms.wrongWayCooldown = Math.max(0, ms.wrongWayCooldown - step);
   }
 
-  if ((plane.fuel ?? 100) <= 0 && !plane.onGround) {
-    ms.failed = true;
-    ms.reason = 'Fuel exhausted in flight';
-    out.push({ type: 'missionFail', points: 0, text: 'OUT OF FUEL!' });
-    dropKeyLatch = false;
-    return out;
+  const list = Array.isArray(events) ? events : [];
+  for (const event of list) {
+    if (!event || typeof event.type !== 'string') continue;
+    if (event.type === 'crash') {
+      failMission(ms, out, 'Crashed');
+    } else if (event.type === 'ring' && ms.id === 'rings') {
+      handleRingEvent(ms, out, event);
+    } else if (event.type === 'liftoff' && ms.id === 'landing' && ms.phase === 'takeoff') {
+      ms.phase = 'circuit';
+      out.push({ type: 'missionScore', text: 'AIRBORNE — FLY THE CIRCUIT' });
+    } else if (event.type === 'touchdown' && ms.id === 'landing' && ms.phase === 'approach') {
+      finishLanding(ms, out, event);
+    } else if (event.type === 'hardLanding' && ms.id === 'landing' && ms.phase === 'approach') {
+      // A hard landing still lands the plane: the base score only, no
+      // quality multiplier — the event carries no usable quality score.
+      ms.score = LANDING_BASE;
+      completeMission(ms, out, 'HARD LANDING — MISSION COMPLETE');
+    } else if (event.type === 'drop' && ms.id === 'canyon') {
+      if (tryDrop(ms, plane, world)) {
+        out.push({ type: 'missionScore', text: 'SUPPLY DROP +' + DROP_POINTS });
+      }
+    }
+    if (ms.done || ms.failed) break;
   }
 
-  if (Math.abs(plane.pos.x) > halfWorld || Math.abs(plane.pos.z) > halfWorld) {
-    ms.outOfBoundsTime += stepDt;
-    if (!ms.oobWarned) {
-      ms.oobWarned = true;
-      out.push({ type: 'missionScore', points: 0, text: 'RETURN TO ISLANDS!' });
-    }
-    if (ms.outOfBoundsTime > 30) {
-      ms.failed = true;
-      ms.reason = 'Out of bounds > 30s';
-      out.push({ type: 'missionFail', points: 0, text: 'LOST AT SEA!' });
-      dropKeyLatch = false;
-      return out;
-    }
-  } else {
-    ms.outOfBoundsTime = 0;
-    ms.oobWarned = false;
-  }
-
-  if (ms.id === 'rings') {
-    stepOrderedRings(ms, plane, world, evs, ringPts, out);
-    if (ms.ringsLeft <= 0) {
-      const bonus = Math.max(0, Math.round((110 - ms.elapsed) * 12));
-      ms.bonusScore = bonus;
-      ms.score += bonus;
-      ms.done = true;
-      updateBest(ms);
-      out.push({ type: 'missionDone', points: bonus, text: 'RINGS CLEAR! BONUS +' + bonus });
-    }
-  } else if (ms.id === 'landing') {
-    const rw = world?.runway || { cx: 0, cz: 0 };
-    const rwyY = world?.heightAt ? world.heightAt(rw.cx ?? 0, rw.cz ?? 0) : 0;
-    const dist = Math.hypot(plane.pos.x - (rw.cx ?? 0), plane.pos.z - (rw.cz ?? 0));
-
-    if (ms.phase === 'takeoff') {
-      const lifted = evs.some((e) => e.type === 'liftoff') || (!plane.onGround && plane.pos.y - rwyY > 12);
-      if (lifted && plane.pos.y - rwyY > 8) {
-        ms.phase = 'circuit';
-        ms.score += 100;
-        ms.baseScore += 100;
-        out.push({ type: 'missionScore', points: 100, text: 'LIFTOFF +100' });
-      }
-    } else if (ms.phase === 'circuit') {
-      if (dist > ms.maxCircuitDist) ms.maxCircuitDist = dist;
-      if (ms.maxCircuitDist >= 450) {
-        ms.phase = 'approach';
-        ms.score += 150;
-        ms.baseScore += 150;
-        out.push({ type: 'missionScore', points: 150, text: 'CIRCUIT COMPLETE +150' });
-      }
-    } else if (ms.phase === 'approach') {
-      const touched =
-        evs.some((e) => e.type === 'touchdown' || e.type === 'hardLanding') ||
-        (!ms.wasOnGround && Boolean(plane.onGround));
-      if (touched && isOnRunwayBounds(plane, world)) {
-        // Use the touchdown/hardLanding EVENT data: stepPlane already reset
-        // vel.y to 0 by the time updateMission runs, so recomputing here
-        // would read sinkRate 0 and score a hard landing like a perfect one.
-        const tdEv = evs.find((e) => e && (e.type === 'touchdown' || e.type === 'hardLanding'));
-        let td;
-        if (tdEv && tdEv.score != null) {
-          td = tdEv; // honest pre-clamp score from stepPlane
-        } else if (tdEv) {
-          // hardLanding event: real sinkRate/speed, score 0 per the
-          // checkRunwayTouchdown rule (sinkRate >= hardLandingSink).
-          const geo = checkRunwayTouchdown(plane, world) || {};
-          td = { ...geo, sinkRate: tdEv.sinkRate, speed: tdEv.speed, score: 0 };
-        } else {
-          td = checkRunwayTouchdown(plane, world) || {};
-        }
-        const quality =
-          td.score != null
-            ? Math.max(0, Math.round(td.score))
-            : Math.max(
-                10,
-                Math.round(
-                  100 -
-                    Math.abs(td.centerOffset || 0) * 3 -
-                    Math.abs(td.sinkRate || 0) * 8 -
-                    Math.max(0, (td.speed || 0) - 36) * 1.5
-                )
-              );
-        const pts = landingBase + quality * 8;
-        ms.bonusScore = quality * 8;
-        ms.score += pts;
-        ms.done = true;
-        updateBest(ms);
-        out.push({ type: 'missionDone', points: pts, text: 'TOUCHDOWN ' + quality });
-      }
-    }
-  } else if (ms.id === 'canyon') {
-    stepOrderedRings(ms, plane, world, evs, ringPts, out);
-    const dropPressed =
-      dropKeyLatch ||
-      Boolean(ms.dropRequested) ||
-      Boolean(input?.consumePressed?.('KeyX')) ||
-      evs.some((e) => e.type === 'drop' || e.type === 'supplyDrop');
-    ms.dropRequested = false;
-
-    if (dropPressed && !ms.dropDelivered && ms.dropZone) {
-      const d = Math.hypot(plane.pos.x - ms.dropZone.x, plane.pos.z - ms.dropZone.z);
-      if (d <= ms.dropZone.r) {
-        ms.dropDelivered = true;
-        ms.dropZone.dropped = true;
-        const pts = 300 + Math.round((1 - d / ms.dropZone.r) * 200);
-        ms.score += pts;
-        ms.baseScore += pts;
-        out.push({ type: 'missionScore', points: pts, text: 'SUPPLY DROP +' + pts });
-      } else {
-        out.push({ type: 'missionScore', points: 0, text: 'DROP ZONE ' + Math.round(d) + 'M AWAY' });
-      }
-    }
-
-    if (ms.ringsLeft <= 0 && ms.dropDelivered) {
-      const bonus = Math.max(100, Math.round((135 - ms.elapsed) * 14));
-      ms.bonusScore = bonus;
-      ms.score += bonus;
-      ms.done = true;
-      updateBest(ms);
-      out.push({ type: 'missionDone', points: bonus, text: 'CANYON RUN COMPLETE +' + bonus });
+  // The X key can also reach the mission through the input object (the
+  // direct-call path the game uses when it has not already consumed it).
+  if (!ms.done && !ms.failed && ms.id === 'canyon' && input
+      && typeof input.consumePressed === 'function') {
+    const pressed = input.consumePressed('KeyX') || input.consumePressed('x');
+    if (pressed && tryDrop(ms, plane, world)) {
+      out.push({ type: 'missionScore', text: 'SUPPLY DROP +' + DROP_POINTS });
     }
   }
 
-  dropKeyLatch = false;
-  ms.wasOnGround = Boolean(plane.onGround);
-  updateBest(ms);
+  // Landing: leaving the circuit for the final approach once the plane is
+  // far enough from the runway to have flown a real circuit.
+  if (!ms.done && !ms.failed && ms.id === 'landing' && ms.phase === 'circuit'
+      && plane && plane.pos && world && world.runway) {
+    const runway = world.runway;
+    const cx = Number.isFinite(runway.cx) ? runway.cx : 0;
+    const cz = Number.isFinite(runway.cz) ? runway.cz : 0;
+    if (horizontalDistance(plane.pos.x, plane.pos.z, cx, cz) > CIRCUIT_DISTANCE) {
+      ms.phase = 'approach';
+      out.push({ type: 'missionScore', text: 'FINAL APPROACH — LINE UP ON RWY 09' });
+    }
+  }
+
+  // Canyon: home is the runway, on the ground, with the drop delivered.
+  if (!ms.done && !ms.failed && ms.id === 'canyon' && ms.dropDelivered
+      && plane && plane.onGround && plane.pos && world && world.runway) {
+    const runway = world.runway;
+    const cx = Number.isFinite(runway.cx) ? runway.cx : 0;
+    const cz = Number.isFinite(runway.cz) ? runway.cz : 0;
+    if (horizontalDistance(plane.pos.x, plane.pos.z, cx, cz) < 150) {
+      let text = 'CANYON RUN COMPLETE — ' + ms.elapsed.toFixed(1) + 's';
+      if (ms.elapsed <= TIME_BONUS_SECONDS) {
+        ms.score += TIME_BONUS_POINTS;
+        text += ' (+' + TIME_BONUS_POINTS + ' TIME BONUS)';
+      }
+      completeMission(ms, out, text);
+    }
+  }
+
+  // Shared failure checks: out of bounds (timed) and fuel out (at once).
+  if (!ms.done && !ms.failed && plane && plane.pos) {
+    const half = CONFIG.world.halfSize || 2000;
+    const distance = Math.sqrt(plane.pos.x * plane.pos.x + plane.pos.z * plane.pos.z);
+    if (distance > half) {
+      ms.outOfBoundsTime += step;
+      if (ms.outOfBoundsTime > OUT_OF_BOUNDS_SECONDS) {
+        failMission(ms, out, 'Out of bounds — return to the islands');
+      }
+    } else {
+      ms.outOfBoundsTime = 0;
+    }
+    if (typeof plane.fuel === 'number' && plane.fuel <= 0 && !plane.onGround) {
+      failMission(ms, out, 'Fuel exhausted');
+    }
+  }
+
+  if (plane) ms.wasOnGround = Boolean(plane.onGround);
   return out;
 }
 
-export function missionObjectiveText(ms) {
-  if (!ms) return 'Select a mission (1 / 2 / 3) and press ENTER';
-  if (ms.done) return 'MISSION COMPLETE — FINAL SCORE ' + ms.score;
-  if (ms.failed) return 'MISSION FAILED — ' + (ms.reason || 'Aircraft lost');
-  if (ms.outOfBoundsTime > 0) {
-    return 'OUT OF BOUNDS! Turn back within ' + Math.max(0, Math.ceil(30 - ms.outOfBoundsTime)) + 's';
+// One ring event: the next ring in order scores and advances; any other
+// ring is a wrong-way pass — no points, and a short cooldown so the warning
+// does not spam every frame the plane sits inside it.
+function handleRingEvent(ms, out, event) {
+  if (event.index === ms.nextRingIndex) {
+    ms.score += RING_POINTS;
+    ms.nextRingIndex += 1;
+    if (event.ring) event.ring.passed = true;
+    out.push({ type: 'ring', text: '+' + RING_POINTS + ' RING!' });
+    if (ms.nextRingIndex >= ms.ringsTotal) {
+      completeMission(ms, out, 'RING RACE COMPLETE!');
+    }
+  } else {
+    // Out of order: mark the ring un-passed so the game skips the sound,
+    // the burst and the points for it, and warn once per pass.
+    if (event.ring) event.ring.passed = false;
+    ms.wrongWayCooldown = WRONG_WAY_SECONDS;
+    out.push({ type: 'missionScore', text: 'WRONG WAY' });
   }
+}
+
+// Score a landing from the touchdown event's own measurements. The event
+// carries the quality score the physics step computed before it reset the
+// vertical speed, so this never re-derives it from a zeroed sink rate.
+function finishLanding(ms, out, event) {
+  const quality = typeof event.score === 'number' && Number.isFinite(event.score)
+    ? event.score
+    : 0;
+  ms.score = LANDING_BASE + quality * 8;
+  const label = event.perfect ? 'PERFECT LANDING' : 'LANDING';
+  completeMission(ms, out, label + ' — MISSION COMPLETE');
+}
+
+// The banner line the HUD shows: the mission, the current step, and the
+// numbers the player needs right now.
+export function missionObjectiveText(ms) {
+  if (!ms) return '';
   if (ms.id === 'rings') {
+    if (ms.done) return 'RING RACE: Complete!';
     return 'RING RACE: Pass ring ' + (ms.nextRingIndex + 1) + '/' + ms.ringsTotal + ' in order';
   }
   if (ms.id === 'landing') {
-    if (ms.phase === 'takeoff') return 'PRECISION LANDING: Throttle up (W) and take off from runway';
-    if (ms.phase === 'circuit') {
-      return 'PRECISION LANDING: Fly outbound circuit (' + Math.min(450, Math.round(ms.maxCircuitDist)) + '/450m)';
-    }
+    if (ms.done) return 'PRECISION LANDING: Complete!';
+    if (ms.phase === 'takeoff') return 'PRECISION LANDING: Take off from RWY 09';
+    if (ms.phase === 'circuit') return 'PRECISION LANDING: Fly the circuit, then line up';
     return 'PRECISION LANDING: Line up on RWY 09, gear down (G)';
   }
-  if (ms.ringsLeft > 0 && !ms.dropDelivered) {
-    return 'CANYON RUN: Ring ' + (ms.nextRingIndex + 1) + '/' + ms.ringsTotal + ' + Supply Drop (press X at zone)';
+  if (ms.id === 'canyon') {
+    if (ms.done) return 'CANYON RUN: Complete!';
+    if (ms.dropDelivered) return 'CANYON RUN: Drop delivered — return to RWY 09';
+    return 'CANYON RUN: Race the canyon, drop supplies (X) at the zone';
   }
-  if (ms.ringsLeft > 0) {
-    return 'CANYON RUN: Supplies dropped! Clear ring ' + (ms.nextRingIndex + 1) + '/' + ms.ringsTotal;
-  }
-  return 'CANYON RUN: Fly over Drop Zone and press X to release supplies';
+  return '';
 }
