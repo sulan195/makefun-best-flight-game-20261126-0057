@@ -48,7 +48,8 @@ function computeDropZone(world) {
   const vz = world?.volcano?.z ?? -900;
   const x = last ? last.x * 0.65 + vx * 0.2 : vx - 240;
   const z = last ? last.z * 0.65 + vz * 0.2 : vz + 220;
-  const ground = world?.heightAt ? Math.max(0, world.heightAt(x, z)) : 12;
+  const h = world?.heightAt ? world.heightAt(x, z) : undefined;
+  const ground = Number.isFinite(h) ? Math.max(0, h) : 12;
   return { x, y: ground + 4, z, r: 140, dropped: false };
 }
 

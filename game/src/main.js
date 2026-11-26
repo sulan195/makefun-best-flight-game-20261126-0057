@@ -575,7 +575,9 @@ export function startGame(canvas, query) {
     : new URLSearchParams(typeof query === 'string' ? query : (typeof window !== 'undefined' ? window.location.search : ''));
 
   const seedParam = params.get('seed');
-  const initialSeed = seedParam !== null && seedParam !== '' ? Number(seedParam) || 1 : 1;
+  // Seed 0 is valid: only NaN falls back to 1 (Number('0') || 1 would coerce 0).
+  const seedNum = seedParam !== null && seedParam !== '' ? Number(seedParam) : NaN;
+  const initialSeed = Number.isFinite(seedNum) ? seedNum : 1;
 
   const input = createInput();
   input.attach(canvas);
