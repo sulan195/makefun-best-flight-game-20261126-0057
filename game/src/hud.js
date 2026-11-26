@@ -104,6 +104,9 @@ function drawCompass(ctx, cx, y, hdgDeg, rwyDeg) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
+  // Skip labels that would collide with the previous label or sit half-clipped
+  // at the tape's edges (e.g. "SE" running into "090" at the panel edge).
+  let lastLabelTx = -Infinity;
   for (let offset = -60; offset <= 60; offset += 5) {
     const base = Math.round((hdgDeg + offset) / 5) * 5;
     const diff = ((base - hdgDeg + 540) % 360) - 180;
@@ -115,14 +118,17 @@ function drawCompass(ctx, cx, y, hdgDeg, rwyDeg) {
     ctx.moveTo(tx, y + h - (lbl ? 10 : 6));
     ctx.lineTo(tx, y + h - 1);
     ctx.stroke();
+    if (tx < x + 18 || tx > x + w - 18 || tx - lastLabelTx < 30) continue;
     if (lbl) {
       ctx.font = 'bold 12px ' + FONT;
       ctx.fillStyle = deg === 0 ? CORAL : AMBER;
       ctx.fillText(lbl, tx, y + 13);
+      lastLabelTx = tx;
     } else if (deg % 30 === 0) {
       ctx.font = '10px ' + FONT;
       ctx.fillStyle = 'rgba(255, 232, 200, 0.72)';
       ctx.fillText(String(deg).padStart(3, '0'), tx, y + 13);
+      lastLabelTx = tx;
     }
   }
 
@@ -261,7 +267,9 @@ export function drawHUD(ctx, game) {
   ctx.textAlign = 'center';
   ctx.fillText(obj, W * 0.5, 101);
 
-  drawHorizon(ctx, 20, H - 144, 124, plane.pitch || 0, plane.roll || 0);
+  // The cockpit dashboard already has its own attitude ball — the corner
+  // widget is redundant (and duplicative) in cockpit view.
+  if (game?.view !== 'cockpit') drawHorizon(ctx, 20, H - 144, 124, plane.pitch || 0, plane.roll || 0);
 
   panel(ctx, 152, H - 114, 122, 94);
   const rawWindDir = world?.wind?.dir ?? 0;

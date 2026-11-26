@@ -250,11 +250,13 @@ export function applyShot(game, query) {
     settleChase(cam, plane, world);
   } else if (shot === 'rings') {
     game.time = 35.2;
-    for (let i = 0; i < Math.min(2, rings.length); i++) rings[i].passed = true;
-    game.score = Math.min(2, rings.length) * ringPts;
+    // Stage the ring-pass moment itself: ring 3 just cleared (green), burst
+    // particles spreading, "+250 RING!" popup above it — the juice proof.
+    for (let i = 0; i < Math.min(3, rings.length); i++) rings[i].passed = true;
+    game.score = Math.min(3, rings.length) * ringPts;
     if (ms && typeof ms === 'object') {
       ms.score = game.score;
-      if (typeof ms.nextRingIndex === 'number') ms.nextRingIndex = Math.min(2, rings.length);
+      if (typeof ms.nextRingIndex === 'number') ms.nextRingIndex = Math.min(3, rings.length);
     }
     const r3 = rings[2] || rings[0] || { x: 320, y: 78, z: -180, r: 18 };
     const rPrev = rings[1] || { x: rw.cx, y: 70, z: rw.cz };
@@ -262,13 +264,14 @@ export function applyShot(game, query) {
     let vz = r3.z - rPrev.z;
     const vl = Math.hypot(vx, vz) || 1;
     vx /= vl; vz /= vl;
-    const px = r3.x - vx * 20;
-    const pz = r3.z - vz * 20;
-    const py = Math.max(r3.y - 1.2, world.heightAt(px, pz) + 16);
+    // Plane at the ring plane, just through it.
+    const px = r3.x - vx * 2;
+    const pz = r3.z - vz * 2;
+    const py = r3.y;
     setFlightState(
       plane,
       { x: px, y: py, z: pz },
-      { x: vx, y: (r3.y - py) / 22, z: vz },
+      { x: vx, y: 0, z: vz },
       maxSpd * 0.86, 1.0, -0.22, false, false, false
     );
     plane.fuel = 86;
@@ -277,8 +280,20 @@ export function applyShot(game, query) {
     cam.pos.y = plane.pos.y + 4.0;
     cam.pos.z = plane.pos.z - vz * 14.5;
     orientCameraToward(cam, vx, (r3.y - cam.pos.y) / 38, vz, 0);
+    // Burst at the cleared ring, advanced so the particles have spread,
+    // then the score popup projected above the ring.
+    effects.spawnRingBurst?.(r3.x, r3.y, r3.z);
+    effects.update?.(0.1);
+    effects.update?.(0.1);
+    effects.update?.(0.1);
+    const pop = project(cam, { x: r3.x, y: r3.y + 7, z: r3.z });
+    if (pop && !pop.behind && Number.isFinite(pop.x) && Number.isFinite(pop.y)) {
+      effects.addText?.(Math.round(pop.x), Math.round(pop.y), '+250 RING!', '#ffd166');
+    }
   } else if (shot === 'landing') {
     game.time = 44.0;
+    // The staged state is the final approach, not the takeoff roll.
+    if (ms && typeof ms === 'object') ms.phase = 'approach';
     const px = threshX - dx * 300;
     const pz = threshZ - dz * 300;
     const py = Math.max(ry + 36, world.heightAt(px, pz) + 22);
@@ -324,6 +339,14 @@ export function applyShot(game, query) {
   game.ringsPassed = rings.filter((r) => r.passed).length;
   game.ringsTotal = rings.length;
   game.objective = missionObjectiveText(ms);
+  // Staged flying shots: the HUD timer reads mission.elapsed, which only
+  // advances while the sim runs — sync it to the staged clock so the
+  // screenshots show a running timer. Also pin _smokeT so the frozen render
+  // doesn't spawn one stray oversized smoke puff at the tail (it reads as
+  // a floating grey disc). The title shot keeps elapsed 0: its mission
+  // hasn't started yet, so 00:00.0 is honest there.
+  if (shot !== 'start' && ms && typeof ms === 'object') ms.elapsed = game.time;
+  game._smokeT = game.time;
   return true;
 }
 

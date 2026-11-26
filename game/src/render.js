@@ -689,7 +689,9 @@ function drawRunway(ctx, cam, cv, world) {
 }
 
 function drawRingsAndDropZones(ctx, cam, world, mission, drops, time) {
-  const rings = world.rings || [];
+  // Ring Race rings belong to the rings/canyon missions — the Precision
+  // Landing mission flies a clean approach with no rings in the sky.
+  const rings = mission?.id === 'landing' ? [] : world.rings || [];
   const items = [];
   let firstUnpassed = -1;
   for (let i = 0; i < rings.length; i++) {
@@ -727,8 +729,8 @@ function drawRingsAndDropZones(ctx, cam, world, mission, drops, time) {
     const pulse = idx === firstUnpassed ? 1 + 0.06 * Math.sin(time * 6) : 1;
     const rad = (r.r || 18) * pulse;
     const pts = [];
-    for (let k = 0; k < 12; k++) {
-      const a = (k / 12) * Math.PI * 2;
+    for (let k = 0; k < 28; k++) {
+      const a = (k / 28) * Math.PI * 2;
       const ca = Math.cos(a) * rad;
       const sa = Math.sin(a) * rad;
       tmpPt.x = r.x + ux * ca;
@@ -747,8 +749,8 @@ function drawRingsAndDropZones(ctx, cam, world, mission, drops, time) {
     for (let pass = 0; pass < 2; pass++) {
       ctx.beginPath();
       let started = false;
-      for (let k = 0; k <= 12; k++) {
-        const pA = pts[k % 12];
+      for (let k = 0; k <= 28; k++) {
+        const pA = pts[k % 28];
         if (pA.behind) {
           started = false;
           continue;
@@ -1076,6 +1078,17 @@ function drawCockpitFrame(ctx, game, W, H) {
     ctx.arc(gx, gy, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+    // Scale ticks (0 / 25 / 50 / 75 / 100% of the dial range) — the dials
+    // previously had a bare needle with no scale to read against.
+    ctx.strokeStyle = '#7c8aa5';
+    ctx.lineWidth = 2;
+    for (let t = 0; t <= 4; t++) {
+      const ta = -Math.PI * 0.75 + (t / 4) * Math.PI * 1.5;
+      ctx.beginPath();
+      ctx.moveTo(gx + Math.cos(ta) * (r - 7), gy + Math.sin(ta) * (r - 7));
+      ctx.lineTo(gx + Math.cos(ta) * (r - 2), gy + Math.sin(ta) * (r - 2));
+      ctx.stroke();
+    }
     const ang = -Math.PI * 0.75 + Math.max(0, Math.min(1, normVal)) * Math.PI * 1.5;
     ctx.strokeStyle = '#ff9d42';
     ctx.lineWidth = 2.6;
@@ -1119,13 +1132,14 @@ function drawCockpitFrame(ctx, game, W, H) {
   ctx.arc(ax, gy, ar, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Status lamps (GEAR / FLAPS)
+  // Status lamps (GEAR / FLAPS) — GEAR sits at W*0.26 so it clears the HUD
+  // WIND panel (which ends at x=274); at W*0.22 the panel covered its "G".
   ctx.font = 'bold 11px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillStyle = p.gearDown ? '#2ee878' : '#39414f';
-  ctx.fillRect(W * 0.22 - 24, gy - 16, 48, 18);
+  ctx.fillRect(W * 0.26 - 24, gy - 16, 48, 18);
   ctx.fillStyle = '#0d1117';
-  ctx.fillText('GEAR', W * 0.22, gy - 3);
+  ctx.fillText('GEAR', W * 0.26, gy - 3);
 
   ctx.fillStyle = p.flaps ? '#ffd15c' : '#39414f';
   ctx.fillRect(W * 0.78 - 24, gy - 16, 48, 18);

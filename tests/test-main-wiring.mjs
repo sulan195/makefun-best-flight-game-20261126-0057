@@ -303,5 +303,62 @@ test('missions wiring: landing score uses event sinkRate/score, not recompute', 
   assert.equal(msB.score, 100, `hard landing scores base only (got ${msB.score})`);
 });
 
-console.log(`\n${passed} passed, ${passed === 7 ? 0 : 7 - passed} failed`);
-if (passed !== 7) process.exitCode = 1;
+function bootStaged(query) {
+  // Frozen staged shot (no still=0): startGame returns without starting the
+  // rAF loop, so there is nothing to drive.
+  rafCb = null;
+  nowMs = 0;
+  const game = startGame(canvasStub(), query);
+  assert.equal(game.state, 'flying', `bootStaged ${query}: expected flying state`);
+  return game;
+}
+
+// 8. Staged 'rings' shot shows the ring-pass moment: 3 rings cleared,
+// score 750, burst particles spread, "+250 RING!" popup, running timer,
+// and no stray smoke puff in the frozen frame.
+test('staging: rings shot is the ring-pass moment with burst + popup', () => {
+  const game = bootStaged('?shot=rings&seed=1');
+  assert.equal(game.score, 750, 'rings shot score is 3 rings x 250');
+  assert.equal(game.mission.score, 750, 'mission score mirrors');
+  assert.equal(game.mission.nextRingIndex, 3, 'next ring is 4/6');
+  assert.equal(game.world.rings[2].passed, true, 'ring 3 marked passed');
+  assert.equal(game.mission.elapsed, 35.2, 'HUD timer reads the staged clock');
+  assert.ok(game.effects.particles.length > 0, 'ring burst particles exist');
+  for (const p of game.effects.particles) {
+    assert.ok(
+      Number.isFinite(p.pos.x) && Number.isFinite(p.pos.y) && Number.isFinite(p.pos.z),
+      'burst particle positions are finite'
+    );
+  }
+  const popup = game.effects.texts.find((t) => t.text === '+250 RING!');
+  assert.ok(popup, '"+250 RING!" popup staged');
+  assert.ok(Number.isFinite(popup.x) && Number.isFinite(popup.y), 'popup has finite screen coords');
+  assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
+});
+
+// 9. Staged 'landing' shot is the final approach, not the takeoff roll.
+test('staging: landing shot phase is approach with running timer', () => {
+  const game = bootStaged('?shot=landing&seed=1');
+  assert.equal(game.mission.id, 'landing', 'landing mission active');
+  assert.equal(game.mission.phase, 'approach', 'banner is the approach instruction');
+  assert.equal(game.mission.elapsed, 44.0, 'HUD timer reads the staged clock');
+  assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
+});
+
+// 10. Staged 'cockpit' shot: ring 1 cleared, timer running.
+test('staging: cockpit shot is consistent (ring 1 cleared, timer running)', () => {
+  const game = bootStaged('?shot=cockpit&seed=1');
+  assert.equal(game.score, 250, 'cockpit shot score is 1 ring x 250');
+  assert.equal(game.mission.nextRingIndex, 1, 'next ring is 2/6');
+  assert.equal(game.mission.elapsed, 19.6, 'HUD timer reads the staged clock');
+});
+
+// 11. Staged 'start' shot keeps the mission timer at 0 (mission not started).
+test('staging: start shot keeps elapsed 0 but pins the smoke timer', () => {
+  const game = bootStaged('?shot=start&seed=1');
+  assert.equal(game.mission.elapsed, 0, 'title shot timer honestly reads 00:00.0');
+  assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
+});
+
+console.log(`\n${passed} passed, ${passed === 11 ? 0 : 11 - passed} failed`);
+if (passed !== 11) process.exitCode = 1;
