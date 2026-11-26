@@ -105,7 +105,9 @@ function drawCompass(ctx, cx, y, hdgDeg, rwyDeg) {
   ctx.textBaseline = 'middle';
 
   // Skip labels that would collide with the previous label or sit half-clipped
-  // at the tape's edges (e.g. "SE" running into "090" at the panel edge).
+  // at the tape's edges. The right 52px are reserved for the digital heading
+  // readout ("090°", right-aligned at x+w-6) — a tape label there runs into
+  // it ("SE" + "090°" read as one blob).
   let lastLabelTx = -Infinity;
   for (let offset = -60; offset <= 60; offset += 5) {
     const base = Math.round((hdgDeg + offset) / 5) * 5;
@@ -118,7 +120,7 @@ function drawCompass(ctx, cx, y, hdgDeg, rwyDeg) {
     ctx.moveTo(tx, y + h - (lbl ? 10 : 6));
     ctx.lineTo(tx, y + h - 1);
     ctx.stroke();
-    if (tx < x + 18 || tx > x + w - 18 || tx - lastLabelTx < 30) continue;
+    if (tx < x + 18 || tx > x + w - 52 || tx - lastLabelTx < 30) continue;
     if (lbl) {
       ctx.font = 'bold 12px ' + FONT;
       ctx.fillStyle = deg === 0 ? CORAL : AMBER;
@@ -261,8 +263,11 @@ export function drawHUD(ctx, game) {
   ctx.fillText(fmtTime(mission?.elapsed ?? t), W * 0.5 + 170, 69);
 
   const obj = missionObjectiveText(mission);
-  panel(ctx, W * 0.5 - 230, 88, 460, 26, 'rgba(92, 225, 230, 0.45)');
+  // Size the banner to the text: a fixed 460px panel overflowed on the long
+  // landing objective ("...touch down smoothly" ran past both edges).
   ctx.font = '12px ' + FONT;
+  const objW = Math.min(760, Math.max(200, ctx.measureText(obj).width + 28));
+  panel(ctx, W * 0.5 - objW / 2, 88, objW, 26, 'rgba(92, 225, 230, 0.45)');
   ctx.fillStyle = CYAN;
   ctx.textAlign = 'center';
   ctx.fillText(obj, W * 0.5, 101);

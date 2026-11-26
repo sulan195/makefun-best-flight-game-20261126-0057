@@ -325,7 +325,7 @@ export function missionObjectiveText(ms) {
     if (ms.phase === 'circuit') {
       return 'PRECISION LANDING: Fly outbound circuit (' + Math.min(450, Math.round(ms.maxCircuitDist)) + '/450m)';
     }
-    return 'PRECISION LANDING: Line up on RWY 09, lower gear (G), touch down smoothly';
+    return 'PRECISION LANDING: Line up on RWY 09, gear down (G)';
   }
   if (ms.ringsLeft > 0 && !ms.dropDelivered) {
     return 'CANYON RUN: Ring ' + (ms.nextRingIndex + 1) + '/' + ms.ringsTotal + ' + Supply Drop (press X at zone)';

@@ -276,16 +276,23 @@ export function applyShot(game, query) {
     );
     plane.fuel = 86;
     settleChase(cam, plane, world);
-    cam.pos.x = plane.pos.x - vx * 14.5;
-    cam.pos.y = plane.pos.y + 4.0;
-    cam.pos.z = plane.pos.z - vz * 14.5;
-    orientCameraToward(cam, vx, (r3.y - cam.pos.y) / 38, vz, 0);
-    // Burst at the cleared ring, advanced so the particles have spread,
+    // Pull the camera back and to the side so the cleared ring reads as an
+    // ellipse framing the plane instead of filling the whole frame (the
+    // straight-behind framing hid the ring and let the burst cloud swallow
+    // the plane).
+    const perpX = -vz, perpZ = vx;
+    cam.pos.x = plane.pos.x - vx * 20 + perpX * 9;
+    cam.pos.y = plane.pos.y + 6;
+    cam.pos.z = plane.pos.z - vz * 20 + perpZ * 9;
+    const dxr = r3.x - cam.pos.x, dyr = r3.y - cam.pos.y, dzr = r3.z - cam.pos.z;
+    const dl = Math.hypot(dxr, dyr, dzr) || 1;
+    orientCameraToward(cam, dxr / dl, dyr / dl, dzr / dl, 0);
+    // Burst at the cleared ring, advanced briefly so the particles have
+    // started to spread (0.15s keeps the cloud tight around the plane),
     // then the score popup projected above the ring.
     effects.spawnRingBurst?.(r3.x, r3.y, r3.z);
-    effects.update?.(0.1);
-    effects.update?.(0.1);
-    effects.update?.(0.1);
+    effects.update?.(0.075);
+    effects.update?.(0.075);
     const pop = project(cam, { x: r3.x, y: r3.y + 7, z: r3.z });
     if (pop && !pop.behind && Number.isFinite(pop.x) && Number.isFinite(pop.y)) {
       effects.addText?.(Math.round(pop.x), Math.round(pop.y), '+250 RING!', '#ffd166');
