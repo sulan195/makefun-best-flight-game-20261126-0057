@@ -1,195 +1,156 @@
-// FILE: game/src/input.js
-const PREVENT_CODES = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+// Ember Isles — keyboard input.
+//
+// This module owns the keyboard and nothing else. Held keys become flight
+// axes (throttle, roll, pitch, yaw, brake) that the physics step reads every
+// frame; single presses (Enter, M, V, G, F, X, P, R, digits) are queued in
+// arrival order until the game consumes them, so a tap is never lost between
+// frames and never fires twice.
+//
+// Gear and flaps are deliberately NOT driven here. The game toggles them
+// itself on the consumed key press (it owns the sound cue and the
+// airborne-only rule), so this module exposes gear/flaps as inert values the
+// physics step can read safely without double-toggling.
 
-function canonKey(raw) {
-  if (!raw) return '';
-  const k = String(raw);
-  if (k.length === 1) {
-    const ch = k.toUpperCase();
-    if (ch >= 'A' && ch <= 'Z') return 'Key' + ch;
-    if (ch >= '0' && ch <= '9') return 'Digit' + ch;
-    if (k === ' ') return 'Space';
-  }
-  if (k.startsWith('Numpad') && k.length === 7 && k[6] >= '0' && k[6] <= '9') {
-    return 'Digit' + k[6];
-  }
-  if (k === 'NumpadEnter' || k === 'Return') return 'Enter';
-  if (k === 'Esc') return 'Escape';
-  if (k.startsWith('key') && k.length === 4) return 'Key' + k[3].toUpperCase();
-  return k;
-}
+const AXIS_KEYS = {
+  throttleUp: ['KeyW'],
+  throttleDown: ['KeyS'],
+  rollLeft: ['ArrowLeft'],
+  rollRight: ['ArrowRight'],
+  pitchUp: ['ArrowUp'],
+  pitchDown: ['ArrowDown'],
+  yawLeft: ['KeyQ'],
+  yawRight: ['KeyE'],
+};
 
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
+// Arrow keys and Space scroll the page by default; the game swallows them.
+const PAGE_SCROLL_CODES = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Space',
+]);
+
+function axisFromKeys(keys, ups, downs) {
+  let value = 0;
+  for (const code of ups) if (keys.has(code)) value += 1;
+  for (const code of downs) if (keys.has(code)) value -= 1;
+  if (value > 1) return 1;
+  if (value < -1) return -1;
+  return value;
 }
 
 export function createInput() {
+  // Codes currently held down (KeyboardEvent.code, e.g. 'KeyW').
   const keys = new Set();
-  const pressed = new Set();
-  const mouse = { x: 640, y: 360, down: false };
-  const axes = { throttleDelta: 0, pitch: 0, roll: 0, yaw: 0, brake: 0 };
-  let canvasEl = null;
+  // Single presses not yet consumed, oldest first. Each entry keeps both
+  // the physical code and the logical key so callers can ask for either.
+  const pressed = [];
+  // Axes the physics step reads. Mirrored onto the input object itself so
+  // callers can use either input.axes.roll or input.roll.
+  const axes = { throttleDelta: 0, roll: 0, pitch: 0, yaw: 0 };
   let attached = false;
 
-  function setKeyState(e, isDown) {
-    const code = canonKey(e.code || e.key);
-    const rawCode = e.code || '';
-    const rawKey = e.key || '';
-    if (isDown) {
-      if (code) keys.add(code);
-      if (rawCode) keys.add(rawCode);
-      if (rawKey.length === 1) {
-        keys.add(rawKey.toLowerCase());
-        keys.add(rawKey.toUpperCase());
-      }
-      if (!e.repeat && code) pressed.add(code);
-    } else {
-      if (code) keys.delete(code);
-      if (rawCode) keys.delete(rawCode);
-      if (rawKey.length === 1) {
-        keys.delete(rawKey.toLowerCase());
-        keys.delete(rawKey.toUpperCase());
-      }
+  function refreshAxes() {
+    axes.throttleDelta = axisFromKeys(keys, AXIS_KEYS.throttleUp, AXIS_KEYS.throttleDown);
+    axes.roll = axisFromKeys(keys, AXIS_KEYS.rollRight, AXIS_KEYS.rollLeft);
+    axes.pitch = axisFromKeys(keys, AXIS_KEYS.pitchUp, AXIS_KEYS.pitchDown);
+    axes.yaw = axisFromKeys(keys, AXIS_KEYS.yawRight, AXIS_KEYS.yawLeft);
+    input.throttleDelta = axes.throttleDelta;
+    input.roll = axes.roll;
+    input.pitch = axes.pitch;
+    input.yaw = axes.yaw;
+    input.brake = keys.has('Space');
+  }
+
+  function onKeyDown(event) {
+    if (!event || typeof event.code !== 'string') return;
+    if (PAGE_SCROLL_CODES.has(event.code) && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+    keys.add(event.code);
+    // Key repeat fires while a key is held; only the first press counts.
+    if (!event.repeat) {
+      pressed.push({
+        code: event.code,
+        key: typeof event.key === 'string' ? event.key : '',
+      });
     }
   }
 
-  function onKeyDown(e) {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const code = canonKey(e.code || e.key);
-    if (PREVENT_CODES.has(code)) e.preventDefault();
-    setKeyState(e, true);
+  function onKeyUp(event) {
+    if (event && typeof event.code === 'string') keys.delete(event.code);
   }
 
-  function onKeyUp(e) {
-    setKeyState(e, false);
-  }
-
-  function updateMouseCoords(e) {
-    if (!canvasEl) return;
-    const rect = canvasEl.getBoundingClientRect();
-    const cw = canvasEl.width || 1280;
-    const ch = canvasEl.height || 720;
-    const rw = rect.width || cw;
-    const rh = rect.height || ch;
-    mouse.x = clamp((e.clientX - rect.left) * (cw / rw), 0, cw);
-    mouse.y = clamp((e.clientY - rect.top) * (ch / rh), 0, ch);
-  }
-
-  function onMouseDown(e) {
-    if (e.button !== 0) return;
-    updateMouseCoords(e);
-    mouse.down = true;
-  }
-
-  function onMouseMove(e) {
-    updateMouseCoords(e);
-  }
-
-  function onMouseUp(e) {
-    if (e.button === 0) mouse.down = false;
-  }
-
-  function clearAll() {
+  function onBlur() {
     keys.clear();
-    pressed.clear();
-    mouse.down = false;
-    axes.throttleDelta = 0;
-    axes.pitch = 0;
-    axes.roll = 0;
-    axes.yaw = 0;
-    axes.brake = 0;
+    pressed.length = 0;
+    refreshAxes();
   }
 
-  function onVisibilityChange() {
-    if (typeof document !== 'undefined' && document.hidden) clearAll();
+  function attach() {
+    if (attached) return;
+    if (typeof window === 'undefined' || !window.addEventListener) return;
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    attached = true;
   }
 
-  function isDown(code) {
-    const c = canonKey(code);
-    return keys.has(c) || keys.has(code);
+  function detach() {
+    if (typeof window !== 'undefined' && window.removeEventListener && attached) {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    }
+    attached = false;
+    keys.clear();
+    pressed.length = 0;
+    refreshAxes();
   }
 
-  return {
-    keys,
-    mouse,
-    axes,
+  // Recompute the axes from the held keys. Called once per frame before
+  // the physics step; axes are instantaneous (no smoothing) so the plane
+  // answers the stick immediately.
+  function update() {
+    refreshAxes();
+  }
 
-    attach(canvas) {
-      if (attached) this.detach();
-      canvasEl = canvas || null;
-      if (canvasEl) {
-        mouse.x = (canvasEl.width || 1280) * 0.5;
-        mouse.y = (canvasEl.height || 720) * 0.5;
-      }
-      if (typeof window !== 'undefined') {
-        window.addEventListener('keydown', onKeyDown);
-        window.addEventListener('keyup', onKeyUp);
-        window.addEventListener('mouseup', onMouseUp);
-        window.addEventListener('blur', clearAll);
-      }
-      if (typeof document !== 'undefined') {
-        document.addEventListener('visibilitychange', onVisibilityChange);
-      }
-      if (canvasEl && canvasEl.addEventListener) {
-        canvasEl.addEventListener('mousedown', onMouseDown);
-        canvasEl.addEventListener('mousemove', onMouseMove);
-      }
-      attached = true;
-    },
-
-    detach() {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('keydown', onKeyDown);
-        window.removeEventListener('keyup', onKeyUp);
-        window.removeEventListener('mouseup', onMouseUp);
-        window.removeEventListener('blur', clearAll);
-      }
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-      }
-      if (canvasEl && canvasEl.removeEventListener) {
-        canvasEl.removeEventListener('mousedown', onMouseDown);
-        canvasEl.removeEventListener('mousemove', onMouseMove);
-      }
-      attached = false;
-      canvasEl = null;
-      clearAll();
-    },
-
-    consumePressed(code) {
-      const c = canonKey(code);
-      if (pressed.has(c)) {
-        pressed.delete(c);
+  // True once if the named key was pressed since the last call for it.
+  // Accepts a KeyboardEvent.code ('KeyM', 'Enter', 'Digit1') or a logical
+  // key ('m', 'enter', '1'); single letters match case-insensitively.
+  // Consuming removes the press, so it can never fire twice.
+  function consumePressed(want) {
+    if (typeof want !== 'string' || want.length === 0) return false;
+    const probe = want.length === 1 ? want.toLowerCase() : want;
+    for (let i = 0; i < pressed.length; i++) {
+      const entry = pressed[i];
+      const entryKey = typeof entry.key === 'string' && entry.key.length === 1
+        ? entry.key.toLowerCase()
+        : entry.key;
+      if (entry.code === want || entry.key === want || entryKey === probe) {
+        pressed.splice(i, 1);
         return true;
       }
-      return false;
-    },
+    }
+    return false;
+  }
 
-    update(_dt) {
-      const thrUp = isDown('KeyW') ? 1 : 0;
-      const thrDn = isDown('KeyS') ? 1 : 0;
-      const kbPitch = (isDown('ArrowUp') ? 1 : 0) - (isDown('ArrowDown') ? 1 : 0);
-      const kbRoll =
-        (isDown('ArrowRight') || isDown('KeyD') ? 1 : 0) -
-        (isDown('ArrowLeft') || isDown('KeyA') ? 1 : 0);
-      const kbYaw = (isDown('KeyE') ? 1 : 0) - (isDown('KeyQ') ? 1 : 0);
-
-      let mPitch = 0;
-      let mRoll = 0;
-      if (mouse.down) {
-        const cw = canvasEl?.width || 1280;
-        const ch = canvasEl?.height || 720;
-        const nx = (mouse.x - cw * 0.5) / (cw * 0.35);
-        const ny = (ch * 0.5 - mouse.y) / (ch * 0.35);
-        mRoll = Math.abs(nx) < 0.03 ? 0 : clamp(nx, -1, 1);
-        mPitch = Math.abs(ny) < 0.03 ? 0 : clamp(ny, -1, 1);
-      }
-
-      axes.throttleDelta = clamp(thrUp - thrDn, -1, 1);
-      axes.pitch = clamp(kbPitch + mPitch, -1, 1);
-      axes.roll = clamp(kbRoll + mRoll, -1, 1);
-      axes.yaw = clamp(kbYaw, -1, 1);
-      axes.brake = isDown('Space') ? 1 : 0;
-    },
+  const input = {
+    keys,
+    axes,
+    throttleDelta: 0,
+    roll: 0,
+    pitch: 0,
+    yaw: 0,
+    brake: false,
+    // Inert by design (see the header): the game owns gear/flaps toggling.
+    gear: false,
+    flaps: 0,
+    attach,
+    detach,
+    update,
+    consumePressed,
   };
+  return input;
 }
