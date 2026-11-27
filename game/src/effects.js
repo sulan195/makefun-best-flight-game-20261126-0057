@@ -383,6 +383,11 @@ export function createEffects(seed = 2026) {
         const remaining = Math.max(0, Math.min(1, t.life / t.maxLife));
         ctx.globalAlpha = remaining;
         ctx.font = 'bold ' + (t.size || 16) + 'px system-ui, sans-serif';
+        // Dark outline first: pale popup colours (+250 RING! gold) wash
+        // out against the bright sunset sky without one.
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(20,16,8,0.55)';
+        ctx.strokeText(t.text, t.x, t.y);
         ctx.fillStyle = t.color;
         ctx.fillText(t.text, t.x, t.y);
       }

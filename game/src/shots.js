@@ -337,6 +337,15 @@ export function applyShot(game, query) {
     if (pop && !pop.behind && Number.isFinite(pop.x) && Number.isFinite(pop.y)) {
       effects.addText?.(Math.round(pop.x), Math.round(pop.y), '+250 RING!', '#ffd166', 18);
     }
+    // Ember Storm: three chained rings light the storm (main.js) and
+    // this shot has just staged exactly that third chained pass, so show
+    // the game's signature mechanic instead of leaving it invisible:
+    // storm banner up (hud.js) and embers drifting around the plane. The
+    // staged window is long (60 s of game time) so the banner cannot
+    // expire during the render wait; the storm's real duration is 6 s.
+    game.emberStormUntil = game.time + 60;
+    for (let k = 0; k < 5; k++) effects.spawnEmbers?.(plane.pos.x, plane.pos.y, plane.pos.z);
+    effects.update?.(0.075);
   } else if (shot === 'landing') {
     game.time = 44.0;
     // The staged state is the final approach, not the takeoff roll.

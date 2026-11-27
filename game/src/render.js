@@ -441,16 +441,19 @@ function drawSkyAndSea(ctx, cam, cv, world, time, pal, W, H) {
   for (let i = 0; i < skyData.sparkles.length; i++) {
     const sp = skyData.sparkles[i];
     const tw = Math.sin(time * sp.freq + sp.phase) * Math.cos(time * sp.freq * 0.61 + sp.phase * 1.7);
-    if (tw <= 0.08) continue;
+    if (tw <= 0.3) continue;
     const lat = sp.dist * sp.lat;
     tmpPt.x = cam.pos.x + sx * sp.dist + px * lat;
     tmpPt.y = 0;
     tmpPt.z = cam.pos.z + sz * sp.dist + pz * lat;
     const pr = project(cam, tmpPt);
     if (pr.behind || pr.x < 0 || pr.x > W || pr.y < 0 || pr.y > H) continue;
-    const w = Math.min(18, 2.2 + sp.size * (1200 / (sp.dist + 160)));
-    const h = Math.max(1.1, w * 0.24);
-    ctx.globalAlpha = Math.min(0.95, (tw - 0.08) * 0.95);
+    // Sun glitter: small, flat, broken glints — capped well below the
+    // old size/alpha, whose solid pale ellipses read as floating discs
+    // on the water in the landing shot.
+    const w = Math.min(11, 1.6 + sp.size * (1200 / (sp.dist + 160)));
+    const h = Math.max(1, w * 0.16);
+    ctx.globalAlpha = Math.min(0.55, (tw - 0.3) * 0.8);
     ctx.beginPath();
     ctx.ellipse(pr.x, pr.y, w, h, hz.angle, 0, Math.PI * 2);
     ctx.fill();
