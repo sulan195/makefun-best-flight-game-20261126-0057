@@ -31,6 +31,8 @@ const TIME_BONUS_POINTS = 500;
 const OUT_OF_BOUNDS_SECONDS = 30;
 const CIRCUIT_DISTANCE = 300;
 const WRONG_WAY_SECONDS = 2;
+const COMBO_WINDOW_SECONDS = 12;
+const COMBO_MAX = 5;
 
 export const MISSIONS = [
   {
@@ -93,6 +95,12 @@ export function createMissionState(id, world) {
     wasOnGround: false,
     dropZone: def.id === 'canyon' ? computeDropZone(world) : null,
     dropDelivered: false,
+    // Ring combo (revision 2026-11-27): consecutive in-order ring passes
+    // within COMBO_WINDOW_SECONDS multiply the ring points. Starts at x1 so
+    // the first ring of a run is always worth exactly RING_POINTS.
+    combo: 1,
+    lastRingAt: null,
+    lastRingPoints: RING_POINTS,
   };
   // The canyon drop is attempted two ways: the game calls this directly
   // when the player presses X, and updateMission calls it when it sees a
@@ -149,12 +157,26 @@ export function updateMission(ms, plane, world, events, dt, input) {
       ms.phase = 'circuit';
       out.push({ type: 'missionScore', text: 'AIRBORNE — FLY THE CIRCUIT' });
     } else if (event.type === 'touchdown' && ms.id === 'landing' && ms.phase === 'approach') {
-      finishLanding(ms, out, event);
+      // The mission objective is RWY 09: a touchdown off the runway does
+      // NOT complete the mission (the event carries onRunway from
+      // checkRunwayTouchdown). The plane stays on the ground; the player
+      // can take off again and retry — the phase stays 'approach'.
+      if (event.onRunway) {
+        finishLanding(ms, out, event);
+      } else {
+        out.push({ type: 'missionScore', text: 'OFF RUNWAY — LINE UP ON RWY 09' });
+      }
     } else if (event.type === 'hardLanding' && ms.id === 'landing' && ms.phase === 'approach') {
       // A hard landing still lands the plane: the base score only, no
       // quality multiplier — the event carries no usable quality score.
-      ms.score = LANDING_BASE;
-      completeMission(ms, out, 'HARD LANDING — MISSION COMPLETE');
+      // Same runway gate as a gentle touchdown: checkCrash reports the
+      // ground type, so only a hard landing ON the runway completes.
+      if (event.groundType === 'runway') {
+        ms.score = LANDING_BASE;
+        completeMission(ms, out, 'HARD LANDING — MISSION COMPLETE');
+      } else {
+        out.push({ type: 'missionScore', text: 'OFF RUNWAY — HARD LANDING, LINE UP ON RWY 09' });
+      }
     } else if (event.type === 'drop' && ms.id === 'canyon') {
       if (tryDrop(ms, plane, world)) {
         out.push({ type: 'missionScore', text: 'SUPPLY DROP +' + DROP_POINTS });
@@ -228,19 +250,40 @@ export function updateMission(ms, plane, world, events, dt, input) {
 // does not spam every frame the plane sits inside it.
 function handleRingEvent(ms, out, event) {
   if (event.index === ms.nextRingIndex) {
-    ms.score += RING_POINTS;
+    // Combo: a ring passed within COMBO_WINDOW_SECONDS of the previous one
+    // raises the multiplier (capped); a slow gap resets it to x1. The
+    // boundary is inclusive: exactly 12.0s still counts as chained.
+    const now = typeof ms.elapsed === 'number' ? ms.elapsed : 0;
+    if (ms.lastRingAt !== null && now - ms.lastRingAt <= COMBO_WINDOW_SECONDS) {
+      ms.combo = Math.min(COMBO_MAX, (ms.combo || 1) + 1);
+    } else {
+      ms.combo = 1;
+    }
+    ms.lastRingAt = now;
+    const pts = RING_POINTS * ms.combo;
+    ms.lastRingPoints = pts;
+    ms.score += pts;
     ms.nextRingIndex += 1;
     if (event.ring) event.ring.passed = true;
-    out.push({ type: 'ring', text: '+' + RING_POINTS + ' RING!' });
+    out.push({
+      type: 'ring',
+      text: '+' + pts + ' RING!' + (ms.combo > 1 ? ' COMBO x' + ms.combo : ''),
+    });
     if (ms.nextRingIndex >= ms.ringsTotal) {
       completeMission(ms, out, 'RING RACE COMPLETE!');
     }
   } else {
     // Out of order: mark the ring un-passed so the game skips the sound,
-    // the burst and the points for it, and warn once per pass.
+    // the burst and the points for it, and warn once per cooldown window
+    // (the cooldown is decremented at the top of updateMission; without
+    // this gate a player shuttling through a wrong ring spams WRONG WAY).
     if (event.ring) event.ring.passed = false;
+    ms.combo = 1;
+    ms.lastRingAt = null;
+    if (ms.wrongWayCooldown <= 0) {
+      out.push({ type: 'missionScore', text: 'WRONG WAY' });
+    }
     ms.wrongWayCooldown = WRONG_WAY_SECONDS;
-    out.push({ type: 'missionScore', text: 'WRONG WAY' });
   }
 }
 

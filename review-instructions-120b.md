@@ -7,3 +7,8 @@ tanpa network load, 3-4 screenshot ≤256 KiB 1280x720, dossier teks ≤163.840 
 README 3 badge make.fun. Keluaran: temuan terstruktur (severity, file, lokasi, isu, bukti, saran).
 Catatan: klaim tentang URL/query string WAJIB dicek ke file sumber via grep; MAKEFUN_OUTPUT_DIR
 adalah kontrak harness, BUKAN path arbitrer — jangan laporkan sebagai masalah.
+REVISI 2026-11-27 (verifikasi khusus): combo ring x1–x5 (jendela 12 dtk, cap x5, reset
+wrong-way/gap), Ember Storm combo ≥3 (6 dtk, fuel burn +0,11/dtk, mati saat crash/reset),
+landing HANYA selesai bila onRunway (touchdown) / groundType runway (hardLanding),
+popup ring per-event dari output misi (bukan lastRingPoints tunggal), kamera staged shot
+deterministik. Tes: 32/32 + 13/13 lolos.

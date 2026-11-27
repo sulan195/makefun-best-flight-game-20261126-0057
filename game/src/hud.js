@@ -272,6 +272,18 @@ export function drawHUD(ctx, game) {
   ctx.textAlign = 'center';
   ctx.fillText(obj, W * 0.5, 101);
 
+  // Ember Storm banner: shows while the storm timer runs, pulsing so it
+  // reads as a live event rather than a static label.
+  if (game?.emberStormUntil && (game?.time ?? 0) < game.emberStormUntil) {
+    const pulse = 0.55 + 0.25 * Math.sin((game.time || 0) * 6);
+    ctx.font = 'bold 13px ' + FONT;
+    const stormW = ctx.measureText('EMBER STORM!').width + 28;
+    panel(ctx, W * 0.5 - stormW / 2, 118, stormW, 24, `rgba(255, 94, 43, ${pulse.toFixed(3)})`);
+    ctx.fillStyle = '#fff3d6';
+    ctx.textAlign = 'center';
+    ctx.fillText('EMBER STORM!', W * 0.5, 134);
+  }
+
   // The cockpit dashboard already has its own attitude ball — the corner
   // widget is redundant (and duplicative) in cockpit view.
   if (game?.view !== 'cockpit') drawHorizon(ctx, 20, H - 144, 124, plane.pitch || 0, plane.roll || 0);

@@ -111,6 +111,9 @@ function resetMissionSession(game, targetState) {
   game.result = null;
   game.drops = [];
   game.crashTimer = 0;
+  game.combo = 1;
+  game.emberStormUntil = 0;
+  game._emberT = 0;
   game._alarmNext = 0;
   game._fuelAlarmNext = 0;
   game._oobPopupNext = 0;
@@ -413,6 +416,11 @@ function stepSimulation(game, dt) {
   if (crashedNow) {
     ev.crash = true;
     plane.damage = 100;
+    // Clear the Ember Storm: the crash branch returns before the normal
+    // flying-state storm-expiry logic, so without this the storm banner
+    // would stay visible through the crash sequence and result screen.
+    game.emberStormUntil = 0;
+    game._emberT = 0;
     const gType = String(world.groundType(plane.pos.x, plane.pos.z) || '').toLowerCase();
     if (plane.pos.y <= 1.2 && (gType === 'sea' || gType === 'water' || gType === 'ocean')) {
       effects.spawnSplash?.(plane.pos.x, 0.2, plane.pos.z);
@@ -432,21 +440,49 @@ function stepSimulation(game, dt) {
   const mOut = updateMission(game.mission, plane, world, rawEvents || ev, dt);
   const newMsScore = game.mission && typeof game.mission.score === 'number' ? game.mission.score : null;
 
+  // Per-ring popup text comes from the mission's own output: updateMission
+  // returns one {type:'ring', text:'+500 RING! COMBO x2'} item per accepted
+  // ring, in event order. lastRingPoints/combo are single values holding
+  // only the LAST ring's award, so reading them per popup would mislabel
+  // earlier rings if several pass in one step (the mission score itself
+  // is accumulated per event and was already correct).
+  const ringOuts = (Array.isArray(mOut) ? mOut : []).filter((item) => item && item.type === 'ring');
+  let ringOutIdx = 0;
   for (let i = 0; i < passedNow.length; i++) {
     const r = passedNow[i];
     // The mission may have rejected this ring (out of order: stepOrderedRings
     // sets r.passed = false and shows WRONG WAY). Never award fallback points
     // or a '+250 RING!' popup for a rejected ring.
     if (r.passed === false) continue;
+    // Points come from the mission's combo award (250 x combo); the
+    // fallback only fires if the mission did not score (e.g. a ring passed
+    // outside a mission context), in which case it is a plain x1 ring.
+    const msNow = game.mission;
+    const awarded = msNow && typeof msNow.lastRingPoints === 'number'
+      ? msNow.lastRingPoints
+      : ringPts;
     if (newMsScore === null || newMsScore === prevMsScore) {
-      game.score += ringPts;
+      game.score += awarded;
       if (game.mission && typeof game.mission === 'object') game.mission.score = game.score;
     } else {
       game.score = newMsScore;
     }
+    game.combo = (msNow && typeof msNow.combo === 'number') ? msNow.combo : 1;
     effects.spawnRingBurst?.(r.x, r.y, r.z);
+    effects.spawnRingFlash?.(r.x, r.y, r.z, r.r || 18);
+    effects.addShake?.(4);
     audio.ring?.();
-    addPopup(effects, `+${ringPts} RING!`, { x: r.x, y: r.y + 4, z: r.z }, '#ffd166', game.cam);
+    const comboTag = game.combo > 1 ? ' COMBO x' + game.combo : '';
+    const ringText = ringOuts[ringOutIdx] && typeof ringOuts[ringOutIdx].text === 'string'
+      ? ringOuts[ringOutIdx].text
+      : `+${awarded} RING!${comboTag}`;
+    ringOutIdx++;
+    addPopup(effects, ringText, { x: r.x, y: r.y + 4, z: r.z }, '#ffd166', game.cam);
+    // Ember Storm: three chained rings in a row light the storm — embers
+    // around the plane and a HUD banner for six seconds.
+    if (game.combo >= 3) {
+      game.emberStormUntil = game.time + 6;
+    }
   }
 
   if (tdInfo && tdInfo.score > 0) {
@@ -458,6 +494,7 @@ function stepSimulation(game, dt) {
       game.score = newMsScore;
     }
     audio.touchdown?.(pts);
+    effects.spawnWheelSmoke?.(plane.pos.x, plane.pos.y - 1, plane.pos.z);
     addPopup(effects, `TOUCHDOWN +${pts}!`, { x: plane.pos.x, y: plane.pos.y + 4, z: plane.pos.z }, '#6ef7a7', game.cam);
   } else if (newMsScore !== null && newMsScore > game.score) {
     game.score = newMsScore;
@@ -478,6 +515,24 @@ function stepSimulation(game, dt) {
 
   game.ringsPassed = rings.filter((r) => r.passed).length;
   game.objective = missionObjectiveText(game.mission);
+  // Keep the HUD combo in sync even when the mission resets it without a
+  // ring event (wrong-way pass).
+  game.combo = (game.mission && typeof game.mission.combo === 'number') ? game.mission.combo : 1;
+
+  // Ember Storm tick: while the storm lasts, embers drift around the plane
+  // and the engine works 10% harder against the ember wind (extra fuel
+  // burn on top of the normal burn in stepPlane). Visual-only wind: the
+  // physics wind is untouched, so no flight-model regression.
+  if (game.emberStormUntil && game.time < game.emberStormUntil) {
+    game._emberT = (game._emberT || 0) + dt;
+    if (game._emberT >= 0.12) {
+      game._emberT = 0;
+      effects.spawnEmbers?.(plane.pos.x, plane.pos.y + 1, plane.pos.z);
+    }
+    if (plane.fuel > 0) plane.fuel = Math.max(0, plane.fuel - 0.11 * dt);
+  } else if (game.emberStormUntil) {
+    game.emberStormUntil = 0;
+  }
 
   if (game.view === 'cockpit') {
     syncCockpitCamera(game.cam, plane);

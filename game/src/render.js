@@ -23,6 +23,28 @@ const SUN_DIR = (() => {
   return { x: x * inv, y: y * inv, z: z * inv };
 })();
 
+// Deterministic 0..1 hash of a world position — the per-quad colour noise,
+// palm placement and speed-line jitter all derive from it, so a staged
+// screenshot renders identically every run.
+function hash2(x, z) {
+  const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+const hazeCache = new Map();
+function mixHaze(col, hazeHex, t) {
+  const q = Math.round(t * 20);
+  const key = `${col}|${hazeHex}|${q}`;
+  let out = hazeCache.get(key);
+  if (out) return out;
+  const [r, g, b] = parseColor(col);
+  const [hr, hg, hb] = parseColor(hazeHex);
+  const k = q / 20;
+  out = `rgb(${Math.round(r + (hr - r) * k)},${Math.round(g + (hg - g) * k)},${Math.round(b + (hb - b) * k)})`;
+  hazeCache.set(key, out);
+  return out;
+}
+
 let camProbe = null;
 let cachedSeed = null;
 let cachedSkyData = null;
@@ -211,7 +233,7 @@ function getSeededSky(seed) {
     });
   }
   const sparkles = [];
-  for (let i = 0; i < 85; i++) {
+  for (let i = 0; i < 110; i++) {
     const u = nextRand(rng);
     sparkles.push({
       dist: 65 + u * u * 2500,
@@ -352,7 +374,7 @@ function drawSkyAndSea(ctx, cam, cv, world, time, pal, W, H) {
     if (pr.behind || pr.x < 0 || pr.x > W || pr.y < 0 || pr.y > H) continue;
     const w = Math.min(18, 2.2 + sp.size * (900 / (sp.dist + 160)));
     const h = Math.max(1.1, w * 0.24);
-    ctx.globalAlpha = Math.min(0.88, (tw - 0.14) * 0.95);
+    ctx.globalAlpha = Math.min(0.95, (tw - 0.14) * 0.95);
     ctx.beginPath();
     ctx.ellipse(pr.x, pr.y, w, h, hz.angle, 0, Math.PI * 2);
     ctx.fill();
@@ -364,8 +386,10 @@ function isWaterType(t) {
   return !t || t === 'sea' || t === 'water' || t === 'ocean' || t === 'deep';
 }
 
-function colorForTerrain(type, avgH, slopeDot, pal, volcanoH) {
-  const light = 0.84 + slopeDot * 0.22;
+function colorForTerrain(type, avgH, slopeDot, pal, volcanoH, vary = 0.5) {
+  // vary (0..1, seeded per quad) breaks the flat single-colour look: the
+  // same grass/rock reads as varied ground instead of a painted sheet.
+  const light = (0.84 + slopeDot * 0.22) * (0.92 + 0.16 * vary);
   const t = String(type || '').toLowerCase();
   if (t.includes('runway') || t.includes('asphalt')) {
     return shadeColor('#363940', light);
@@ -373,7 +397,9 @@ function colorForTerrain(type, avgH, slopeDot, pal, volcanoH) {
   if (t.includes('volcano') || t.includes('lava') || t.includes('ash') || t.includes('crater')) {
     const hDark = Math.max(0.45, 1.04 - (avgH / (volcanoH || 260)) * 0.52);
     const ember = avgH > (volcanoH || 260) * 0.84 ? (avgH / (volcanoH || 260) - 0.84) * 3.5 : 0;
-    return shadeColor(pal.volcano, hDark * light, ember);
+    // Warm scoria patchwork: the seeded per-quad variation tints random
+    // quads rust-orange so the cone stops reading as one flat dark mass.
+    return shadeColor(pal.volcano, hDark * light, ember + vary * 0.35);
   }
   if (t.includes('rock') || t.includes('cliff') || t.includes('stone') || avgH > 92) {
     const hDark = Math.max(0.48, 1.05 - (avgH / 240) * 0.48);
@@ -387,7 +413,7 @@ function colorForTerrain(type, avgH, slopeDot, pal, volcanoH) {
   return shadeColor(pal.grass, grassShade * light);
 }
 
-function drawTerrainAndVolcano(ctx, cam, world, pal, W, H) {
+function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
   const N = 48;
   const STEP = 40;
   const snapX = Math.round(cam.pos.x / STEP) * STEP;
@@ -494,7 +520,20 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H) {
 
     let domType = vertType[i0];
     if (isWaterType(domType)) domType = !isWaterType(vertType[i1]) ? vertType[i1] : !isWaterType(vertType[i2]) ? vertType[i2] : vertType[i3];
-    const col = colorForTerrain(domType, avgH, slopeDot, pal, volH);
+    // World-space centre of this quad, for the seeded colour noise and
+    // the palm/foam decisions below.
+    const cxw = (vertWX[i0] + vertWX[i2]) * 0.5;
+    const czw = (vertWZ[i0] + vertWZ[i2]) * 0.5;
+    let col = colorForTerrain(domType, avgH, slopeDot, pal, volH, hash2(cxw, czw));
+    // Distance haze: far ground fades toward the sunset sky instead of
+    // staying a hard flat colour. Never applied to the runway — it must
+    // stay sharp enough to land on.
+    const typeStr = String(domType || '').toLowerCase();
+    if (!typeStr.includes('runway') && quadDepth[i0] > 1960000) {
+      const dist = Math.sqrt(quadDepth[i0]);
+      const hazeT = Math.min(0.55, (dist - 1400) / 1600);
+      col = mixHaze(col, pal.skyLow, hazeT);
+    }
     if (col !== lastFill) {
       ctx.fillStyle = col;
       ctx.strokeStyle = col;
@@ -508,6 +547,48 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H) {
     ctx.closePath();
     ctx.fill();
     if (quadDepth[i0] < 480000) ctx.stroke();
+    // Shoreline foam: on a sand quad, stroke ONLY the edges that straddle
+    // sand/water — the coastline itself. (The first version stroked the
+    // whole outline of every sand quad touching water, which tiled the
+    // entire beach with a pale grid.)
+    if (typeStr.includes('sand')) {
+      const w0 = isWaterType(vertType[i0]);
+      const w1 = isWaterType(vertType[i1]);
+      const w2 = isWaterType(vertType[i2]);
+      const w3 = isWaterType(vertType[i3]);
+      if (w0 !== w1 || w1 !== w2 || w2 !== w3 || w3 !== w0) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,250,235,0.45)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        if (w0 !== w1) { ctx.moveTo(projX[i0], projY[i0]); ctx.lineTo(projX[i1], projY[i1]); }
+        if (w1 !== w2) { ctx.moveTo(projX[i1], projY[i1]); ctx.lineTo(projX[i2], projY[i2]); }
+        if (w2 !== w3) { ctx.moveTo(projX[i2], projY[i2]); ctx.lineTo(projX[i3], projY[i3]); }
+        if (w3 !== w0) { ctx.moveTo(projX[i3], projY[i3]); ctx.lineTo(projX[i0], projY[i0]); }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    // Palms: a few seeded trees on near grass quads — the "world is lived
+    // in" detail the flat terrain lacked. Only near the camera, so distant
+    // terrain never pops.
+    if (typeStr.includes('grass') && avgH > 4 && avgH < 48 &&
+        quadDepth[i0] < 810000 && hash2(cxw + 7, czw + 3) > 0.93) {
+      const px = (projX[i0] + projX[i2]) * 0.5;
+      const py = (projY[i0] + projY[i2]) * 0.5;
+      const s = Math.max(3, Math.min(8, 900 / (Math.sqrt(quadDepth[i0]) + 60) * 7));
+      ctx.save();
+      ctx.fillStyle = '#2c5a2e';
+      ctx.beginPath();
+      ctx.moveTo(px, py - s);
+      ctx.lineTo(px - s * 0.7, py + s * 0.4);
+      ctx.lineTo(px + s * 0.7, py + s * 0.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#6b4a2f';
+      ctx.fillRect(px - 0.8, py + s * 0.4, 1.6, s * 0.7);
+      ctx.restore();
+    }
   }
 
   if (world.volcano) {
@@ -574,6 +655,48 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H) {
       }
       ctx.closePath();
       ctx.fill();
+      // Lava glow pulse: a breathing orange halo under the crater disc, so
+      // the volcano reads as ALIVE rather than a dark blob. Pulses with the
+      // game clock, so a staged shot (fixed time) stays deterministic.
+      const glowR = (() => {
+        tmpPt.x = vx + 46;
+        tmpPt.y = vh + 0.5;
+        tmpPt.z = vz;
+        const edge = project(cam, tmpPt);
+        if (edge.behind) return 0;
+        return Math.hypot(edge.x - apex.x, edge.y - apex.y) * 1.9;
+      })();
+      if (glowR > 2) {
+        ctx.save();
+        ctx.globalAlpha = 0.2 + 0.1 * Math.sin(time * 2.2);
+        ctx.fillStyle = '#ff7b2a';
+        ctx.beginPath();
+        ctx.arc(apex.x, apex.y, glowR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      // Smoke column: six seeded grey puffs rising from the crater and
+      // drifting with the wind, looping as they climb. Drawn after the
+      // cone so the smoke sits in front of the rock, behind the plane
+      // (this whole function runs before the plane is drawn).
+      ctx.save();
+      for (let k = 0; k < 6; k++) {
+        const rise = ((time * 9 + k * 47) % 190);
+        const driftX = Math.sin(k * 2.3 + time * 0.3) * 22 + rise * 0.12;
+        const driftZ = Math.cos(k * 1.7 + time * 0.22) * 16;
+        tmpPt.x = vx + driftX;
+        tmpPt.y = vh + 24 + rise;
+        tmpPt.z = vz + driftZ;
+        const sp = project(cam, tmpPt);
+        if (sp.behind) continue;
+        const sr = 22 + k * 5 + rise * 0.12;
+        ctx.globalAlpha = Math.max(0.05, 0.2 - rise * 0.0009);
+        ctx.fillStyle = '#cfc3ba';
+        ctx.beginPath();
+        ctx.ellipse(sp.x, sp.y, sr, sr * 0.55, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
     }
   }
 }
@@ -836,7 +959,10 @@ function drawChasePlane(ctx, game, W, H) {
   const trimCol = cols.trim || cols.accent || cols.stripe || cols.tail || '#e34c30';
   const glassCol = cols.canopy || cols.glass || cols.cockpit || '#74c7ff';
   const rawSpan = Number(spec.wingSpan) || 11;
-  const spanPx = rawSpan < 35 ? Math.max(150, Math.min(240, rawSpan * 17.5)) : Math.max(140, Math.min(260, rawSpan));
+  // Revision 2026-11-27: the chase plane was too small in frame (the cover
+  // read as "empty runway"). Span factor 17.5 -> 21, cap 240 -> 300, so the
+  // aircraft fills the frame and reads as BUILT, not a speck.
+  const spanPx = rawSpan < 35 ? Math.max(180, Math.min(300, rawSpan * 21)) : Math.max(170, Math.min(300, rawSpan));
   const halfSpan = spanPx * 0.5;
 
   if (effects && typeof effects.spawnEngineSmoke === 'function' && plane.throttle > 0.05 && game._smokeT !== time) {
@@ -981,6 +1107,11 @@ function drawChasePlane(ctx, game, W, H) {
 
   ctx.fillStyle = trimCol;
   ctx.fillRect(-14, 2, 28, 4);
+
+  // White cheatline under the trim stripe — the livery detail that makes
+  // the fuselage read as painted, not a plain tube.
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillRect(-13, 6.5, 26, 2);
 
   // Horizontal tailplane + vertical fin
   const tailSpan = halfSpan * 0.36;
@@ -1149,6 +1280,37 @@ function drawCockpitFrame(ctx, game, W, H) {
   ctx.restore();
 }
 
+function drawSpeedLines(ctx, game, W, H) {
+  // Speed lines: thin white streaks at the left/right screen edges once
+  // the plane is fast. Seeded from the frame number, so a staged shot
+  // (fixed time) renders the same streaks every run.
+  const spd = (game.plane && game.plane.speed) || 0;
+  if (game.view === 'cockpit' || spd <= 60) return;
+  const count = Math.min(14, Math.floor((spd - 60) / 2.5));
+  const frame = Math.floor((game.time || 0) * 24);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < count; i++) {
+    const h1 = hash2(i * 91.7, frame * 13.3);
+    const h2 = hash2(i * 47.1 + 5, frame * 7.9);
+    const y = 40 + h1 * (H - 80);
+    const len = 40 + h2 * 60;
+    if (i % 2 === 0) {
+      ctx.beginPath();
+      ctx.moveTo(-10, y);
+      ctx.lineTo(len, y);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(W + 10, y);
+      ctx.lineTo(W - len, y);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 function drawVignette(ctx, W, H) {
   if (!cachedVigGrad || cachedVigW !== W || cachedVigH !== H) {
     cachedVigW = W;
@@ -1181,7 +1343,7 @@ export function render(ctx, game) {
   if (sx || sy) ctx.translate(sx, sy);
 
   drawSkyAndSea(ctx, cam, cv, world, time, pal, W, H);
-  drawTerrainAndVolcano(ctx, cam, world, pal, W, H);
+  drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time);
   drawRunway(ctx, cam, cv, world);
   drawRingsAndDropZones(ctx, cam, world, mission, game.drops, time);
 
@@ -1204,5 +1366,6 @@ export function render(ctx, game) {
   ctx.restore();
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 1;
+  drawSpeedLines(ctx, game, W, H);
   drawVignette(ctx, W, H);
 }

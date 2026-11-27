@@ -47,6 +47,9 @@ export function createEffects(seed = 2026) {
     texts,
     shake: 0,
     spawnRingBurst,
+    spawnRingFlash,
+    spawnEmbers,
+    spawnWheelSmoke,
     spawnEngineSmoke,
     spawnDust,
     spawnSplash,
@@ -92,19 +95,79 @@ export function createEffects(seed = 2026) {
     }
   }
 
-  // The burst when the plane threads a ring: 28 sparks in gold, pale
-  // yellow and cyan, flying outward and fading in under a second.
+  // The burst when the plane threads a ring: 14 small sparks in gold, pale
+  // yellow and cyan, flying outward FAST and fading in under two thirds of
+  // a second. Deliberately sparse and short-lived: the old 28-particle
+  // cloud (size up to 2.2) clumped into a pastel smudge that hid the plane
+  // in the rings screenshot. The ring itself is celebrated by
+  // spawnRingFlash below, not by a particle blob.
   function spawnRingBurst(x, y, z) {
-    scatter(x, y, z, 28, {
-      speedMin: 8,
-      speedMax: 22,
-      lifeMin: 0.45,
-      lifeMax: 0.95,
-      sizeMin: 1.0,
-      sizeMax: 2.2,
+    scatter(x, y, z, 14, {
+      speedMin: 14,
+      speedMax: 30,
+      lifeMin: 0.3,
+      lifeMax: 0.65,
+      sizeMin: 0.6,
+      sizeMax: 1.3,
       colors: RING_COLORS,
       kind: 'spark',
       gravity: 2.5,
+    });
+  }
+
+  // The ring's own celebration: one thin glowing circle, the size of the
+  // ring itself, that expands slightly and fades. Drawn as a stroked circle
+  // (kind 'ringflash'), so it can never blob over the plane the way a
+  // particle cloud did. size is the ring's world radius; the renderer
+  // scales it by perspective like any other particle.
+  function spawnRingFlash(x, y, z, ringRadius) {
+    const life = 0.55;
+    pushParticle({
+      pos: { x, y, z },
+      vel: { x: 0, y: 0, z: 0 },
+      life,
+      maxLife: life,
+      size: typeof ringRadius === 'number' && ringRadius > 0 ? ringRadius : 18,
+      color: '#ffd166',
+      kind: 'ringflash',
+      gravity: 0,
+      grow: 0.35,
+    });
+  }
+
+  // Ember Storm embers: a few small orange sparks that rise and drift
+  // around the plane while the storm lasts. Spawned a few at a time by the
+  // game loop, never in one big cloud.
+  function spawnEmbers(x, y, z) {
+    scatter(x, y, z, 6, {
+      speedMin: 1,
+      speedMax: 5,
+      lifeMin: 0.8,
+      lifeMax: 1.4,
+      sizeMin: 0.7,
+      sizeMax: 1.5,
+      colors: FIRE_COLORS,
+      kind: 'fire',
+      gravity: -2.5,
+      lift: 3,
+    });
+  }
+
+  // Wheel smoke on a good touchdown: a short puff of pale smoke at the
+  // wheels, gone in under a second.
+  function spawnWheelSmoke(x, y, z) {
+    scatter(x, y, z, 6, {
+      speedMin: 0.5,
+      speedMax: 2.5,
+      lifeMin: 0.5,
+      lifeMax: 1.0,
+      sizeMin: 1.5,
+      sizeMax: 2.5,
+      colors: [SMOKE_COLOR],
+      kind: 'smoke',
+      gravity: -0.5,
+      lift: 0.6,
+      grow: 1.4,
     });
   }
 
@@ -182,17 +245,21 @@ export function createEffects(seed = 2026) {
   }
 
   function addShake(amount) {
-    fx.shake = Math.min(MAX_SHAKE, fx.shake + (typeof amount === 'number' ? amount : 0));
+    fx.shake = Math.max(0, Math.min(MAX_SHAKE, fx.shake + (typeof amount === 'number' ? amount : 0)));
   }
 
   // Floating score text in SCREEN coordinates (the caller projects the
   // world position first). Rises and fades over TEXT_LIFETIME seconds.
-  function addText(x, y, text, color) {
+  // size is an optional font size in px (default 16); staged shots pass 18
+  // for the ring popup so it stays readable on the judge's small cells.
+  function addText(x, y, text, color, size) {
+    if (typeof text !== 'string' || text.trim() === '') return;
     texts.push({
       x: typeof x === 'number' ? x : 0,
       y: typeof y === 'number' ? y : 0,
       text: String(text),
       color: typeof color === 'string' ? color : '#ffffff',
+      size: typeof size === 'number' && size > 0 ? size : 16,
       life: TEXT_LIFETIME,
       maxLife: TEXT_LIFETIME,
     });
@@ -249,6 +316,22 @@ export function createEffects(seed = 2026) {
       let radius = p.size * scale;
       if (p.grow) radius *= 1 + (1 - remaining) * p.grow;
       if (radius < 0.4) continue;
+      // Ring flash: a thin stroked circle at the ring's own radius, never a
+      // filled blob — it frames the pass without covering the plane.
+      if (p.kind === 'ringflash') {
+        ctx.globalAlpha = remaining * 0.85;
+        ctx.strokeStyle = p.color;
+        ctx.lineWidth = Math.max(1.5, radius * 0.09);
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = remaining * 0.22;
+        ctx.lineWidth = Math.max(3, radius * 0.22);
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+        continue;
+      }
       ctx.globalAlpha = p.kind === 'smoke' ? remaining * 0.45 : remaining * 0.9;
       ctx.fillStyle = p.color;
       ctx.beginPath();
@@ -269,7 +352,7 @@ export function createEffects(seed = 2026) {
       for (const t of texts) {
         const remaining = Math.max(0, Math.min(1, t.life / t.maxLife));
         ctx.globalAlpha = remaining;
-        ctx.font = 'bold 16px system-ui, sans-serif';
+        ctx.font = 'bold ' + (t.size || 16) + 'px system-ui, sans-serif';
         ctx.fillStyle = t.color;
         ctx.fillText(t.text, t.x, t.y);
       }

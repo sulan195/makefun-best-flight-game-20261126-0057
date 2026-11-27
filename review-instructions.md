@@ -36,6 +36,28 @@ Perbaikan wiring main.js/render.js (2026-11-26 ~12:30 WIB) sesudah laporan itera
 - flaps siklus numerik (n+1)%3; gear hanya bisa retract saat airborne; spawnDust rate-limit 0,12 dtk.
 - tests/test-main-wiring.mjs (5 test integrasi, startGame nyata) + tests/test.mjs (29 test) lulus 100%.
 
+## REVISI 2026-11-27 (siklus 1228, slot 2) — mohon verifikasi khusus bagian ini
+Alasan revisi: skor stagnan 0,597597 R1→R2, peringkat jatuh 1411/6258 → 9258/13681 (field membesar);
+juri membaca contact sheet screenshot + outline sumber, jadi screenshot adalah medan tempur utama.
+- shots.js: cover `start` di-restage TERBANG (posisi −100,90,−250; arah 0.94,−0.08,−0.34; cruise 55;
+  throttle 0.8) + kamera dekat 19 (override SETELAH settleChase; planeNose mengembalikan ARAH,
+  bukan posisi — JANGAN kurangi plane.pos darinya). Shot `rings`: kamera mundur 62 + samping 30
+  supaya ring utuh sebagai elips; cockpit 82→64 dari ring. Sync ms.elapsed untuk SEMUA shot.
+- effects.js: spawnRingBurst 28→14 partikel kecil/cepat; spawnRingFlash BARU (cincin tipis,
+  radius = radius ring); spawnEmbers + spawnWheelSmoke BARU; addText dukung ukuran font.
+- missions.js + main.js: combo ring x1–x5 (jendela 12 dtk inklusif, reset saat wrong-way/gap);
+  poin = 250 × combo; Ember Storm saat combo ≥ 3 (6 dtk, ember tiap 0,12 dtk, fuel burn +0,11/dtk);
+  shake +4 saat ring-pass; wheel smoke saat touchdown. HUD (hud.js): banner EMBER STORM! berdenyut.
+- render.js: variasi warna per-quad (hash seeded), kabut jarak, foam tepi pasir–air, palem seeded,
+  asap gunung + lava glow berdenyut, sparkles 110, pesawat chase lebih besar (faktor 21, cap 300)
+  + cheatline, speed lines saat speed > 60.
+- Tes: 31/31 (test.mjs) + 12/12 (test-main-wiring.mjs) lulus, termasuk tes combo + storm baru.
+  Staged shot TIDAK lewat handleRingEvent — skor staged tetap manual (750 untuk 3 ring, 250 untuk 1 ring).
+- Verifikasi yang diminta atas revisi: (a) combo tidak bisa meledak (cap x5, reset benar, skor
+  staged tidak ikut combo); (b) Ember Storm mati saat crash/reset misi (emberStormUntil di-reset);
+  (c) tidak ada regresi wiring lama (event array, popup, touchdown, flaps/gear); (d) kamera
+  staged shot deterministik (tidak ada Math.random tak-seeded di jalur render staged).
+
 ## Yang diminta
 Keluarkan temuan TERSTRUKTUR (severity: Kritis/Tinggi/Sedang/Rendah; file; lokasi; isu; bukti;
 saran). Verifikasi: (a) kebenaran kode terhadap kriteria juri & aturan kit di atas;

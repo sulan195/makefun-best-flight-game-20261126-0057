@@ -164,6 +164,38 @@ test('main wiring: ring pass produces ring sound + burst particles + popup + sco
   assert.equal(game.mission.score, game.score, 'mission score mirrors game score');
 });
 
+// 1b. Combo chains on quick successive rings and lights the Ember Storm at x3.
+test('main wiring: quick chained rings multiply points and trigger Ember Storm at x3', () => {
+  const game = boot('?shot=play&seed=1&still=0');
+  game.audio.ring = () => {};
+  const flyThrough = (idx) => {
+    const ring = game.world.rings[idx];
+    const n = ringNormal(ring);
+    game.plane.pos = { x: ring.x - n.x * 0.4, y: ring.y - n.y * 0.4, z: ring.z - n.z * 0.4 };
+    game.plane.prevPos = { x: ring.x - n.x * 1.1, y: ring.y - n.y * 1.1, z: ring.z - n.z * 1.1 };
+    game.plane.vel = { x: n.x * 40, y: n.y * 40, z: n.z * 40 };
+    game.plane.throttle = 0.8;
+    game.plane.yaw = Math.atan2(n.x, -n.z);
+    game.plane.pitch = 0;
+    game.plane.roll = 0;
+    drive(3);
+  };
+  const s0 = game.score; // staged 2 rings = 500
+  flyThrough(2);
+  assert.equal(game.score, s0 + 250, 'first live ring is x1 (+250)');
+  assert.equal(game.combo, 1);
+  flyThrough(3);
+  assert.equal(game.score, s0 + 750, 'second quick ring is x2 (+500)');
+  assert.equal(game.combo, 2);
+  assert.ok(game.effects.texts.some((t) => t.text.includes('COMBO x2')), 'combo popup shown');
+  flyThrough(4);
+  assert.equal(game.score, s0 + 1500, 'third quick ring is x3 (+750)');
+  assert.equal(game.combo, 3);
+  assert.ok(game.emberStormUntil > game.time, 'Ember Storm lit at combo x3');
+  drive(12); // ~0.2s of storm: embers spawn around the plane
+  assert.ok(game.effects.particles.some((p) => p.kind === 'fire'), 'storm embers exist');
+});
+
 // 2. A survivable hard landing damages but does NOT crash the plane.
 test('main wiring: hard landing (sink 10 m/s, runway, gear down) is not fatal', () => {
   const game = boot('?shot=play&seed=1&still=0');
@@ -316,6 +348,16 @@ function bootStaged(query) {
 // 8. Staged 'rings' shot shows the ring-pass moment: 3 rings cleared,
 // score 750, burst particles spread, "+250 RING!" popup, running timer,
 // and no stray smoke puff in the frozen frame.
+test('main wiring: crash clears an active Ember Storm (Luna Fase 5)', () => {
+  const game = boot('?shot=play&seed=1&still=0');
+  game.emberStormUntil = game.time + 6;
+  game._emberT = game.time;
+  game.plane.damage = 100; // forces the crash branch in stepSimulation
+  drive(2);
+  assert.equal(game.state, 'crashed', 'damage 100 must crash the plane');
+  assert.equal(game.emberStormUntil, 0, 'crash must clear the storm timer');
+  assert.equal(game._emberT, 0, 'crash must clear the storm tick');
+});
 test('staging: rings shot is the ring-pass moment with burst + popup', () => {
   const game = bootStaged('?shot=rings&seed=1');
   assert.equal(game.score, 750, 'rings shot score is 3 rings x 250');
@@ -353,12 +395,16 @@ test('staging: cockpit shot is consistent (ring 1 cleared, timer running)', () =
   assert.equal(game.mission.elapsed, 19.6, 'HUD timer reads the staged clock');
 });
 
-// 11. Staged 'start' shot keeps the mission timer at 0 (mission not started).
-test('staging: start shot keeps elapsed 0 but pins the smoke timer', () => {
+// 11. Staged 'start' (cover) shot: the plane is IN FLIGHT at cruise toward
+// the volcano (revision 2026-11-27 — the parked-on-runway cover read as an
+// empty runway), so the timer runs like every other flying shot.
+test('staging: start shot is a flying cover with running timer', () => {
   const game = bootStaged('?shot=start&seed=1');
-  assert.equal(game.mission.elapsed, 0, 'title shot timer honestly reads 00:00.0');
+  assert.equal(game.mission.elapsed, 12.0, 'HUD timer reads the staged clock');
+  assert.ok(game.plane.speed > 40, 'cover plane is flying at cruise, not parked (speed ' + game.plane.speed + ')');
+  assert.equal(game.plane.onGround, false, 'cover plane is airborne');
   assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
 });
 
-console.log(`\n${passed} passed, ${passed === 11 ? 0 : 11 - passed} failed`);
-if (passed !== 11) process.exitCode = 1;
+console.log(`\n${passed} passed, ${passed === 13 ? 0 : 13 - passed} failed`);
+if (passed !== 13) process.exitCode = 1;

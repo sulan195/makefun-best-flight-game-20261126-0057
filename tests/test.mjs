@@ -219,6 +219,35 @@ test('missions: autopilot completes Ring Race (end-to-end)', () => {
   assert.ok(done, 'ring race not completed; rings=' + ms.nextRingIndex + '/6 score=' + ms.score + ' failed=' + ms.failed + ' ' + ms.reason);
   assert.ok(ms.score >= 6 * CONFIG.scoring.ringPoints, 'score ' + ms.score);
 });
+test('missions: ring combo multiplies points within 12s, resets after gap or wrong way', () => {
+  const w = createWorld(42); const p = createPlane();
+  const ms = createMissionState('rings', w);
+  const ringEv = (i) => [{ type: 'ring', ring: w.rings[i], index: i }];
+  const advance = (sec) => { for (let i = 0; i < Math.round(sec * 60); i++) updateMission(ms, p, w, [], 1 / 60, null); };
+  updateMission(ms, p, w, ringEv(0), 1 / 60, null);
+  assert.equal(ms.score, 250, 'first ring is x1 = 250');
+  assert.equal(ms.combo, 1);
+  advance(5);
+  updateMission(ms, p, w, ringEv(1), 1 / 60, null);
+  assert.equal(ms.combo, 2, 'second ring within 12s chains to x2');
+  assert.equal(ms.score, 750, '250 + 500');
+  assert.equal(ms.lastRingPoints, 500);
+  advance(13);
+  updateMission(ms, p, w, ringEv(2), 1 / 60, null);
+  assert.equal(ms.combo, 1, 'gap over 12s resets combo');
+  assert.equal(ms.score, 1000, '750 + 250');
+  // Wrong way resets the combo without scoring.
+  updateMission(ms, p, w, [{ type: 'ring', ring: w.rings[4], index: 4 }], 1 / 60, null);
+  assert.equal(ms.score, 1000, 'wrong-way ring scores nothing');
+  assert.equal(ms.combo, 1);
+  // Combo caps at x5: chain five quick rings from a fresh mission.
+  const ms2 = createMissionState('rings', w);
+  for (let i = 0; i < 5; i++) {
+    updateMission(ms2, p, w, [{ type: 'ring', ring: w.rings[i], index: i }], 1 / 60, null);
+  }
+  assert.equal(ms2.combo, 5, 'combo caps at x5');
+  assert.equal(ms2.score, 250 + 500 + 750 + 1000 + 1250, 'capped combo sum');
+});
 test('missions: landing phases advance takeoff -> circuit -> approach -> done', () => {
   const w = createWorld(42); const p = createPlane();
   const ms = createMissionState('landing', w);
@@ -234,6 +263,26 @@ test('missions: landing phases advance takeoff -> circuit -> approach -> done', 
   updateMission(ms, p, w, [{ type: 'touchdown', onRunway: true, score: 300, perfect: true }], 1 / 60, null);
   assert.ok(ms.done, 'landing mission should complete; phase=' + ms.phase);
   assert.ok(ms.score > 0);
+});
+test('missions: off-runway touchdown/hardLanding do not complete landing (Luna Fase 5)', () => {
+  const w = createWorld(42); const p = createPlane();
+  const ms = createMissionState('landing', w);
+  p.onGround = false; p.pos.y = w.heightAt(0, 0) + 20;
+  updateMission(ms, p, w, [{ type: 'liftoff', speed: 50 }], 1 / 60, null);
+  p.pos = { x: 500, y: 60, z: 0 };
+  updateMission(ms, p, w, [], 1 / 60, null);
+  assert.equal(ms.phase, 'approach');
+  // Touchdown off the runway: mission stays open, player can retry.
+  let out = updateMission(ms, p, w, [{ type: 'touchdown', onRunway: false, score: 0, perfect: false }], 1 / 60, null);
+  assert.equal(ms.done, false, 'off-runway touchdown must not complete');
+  assert.ok(out.some((o) => o.text && o.text.includes('OFF RUNWAY')));
+  // Hard landing on grass: same — no completion.
+  out = updateMission(ms, p, w, [{ type: 'hardLanding', sinkRate: 10, speed: 40, groundType: 'grass', damage: 30 }], 1 / 60, null);
+  assert.equal(ms.done, false, 'off-runway hard landing must not complete');
+  // Hard landing ON the runway: completes with the base score.
+  out = updateMission(ms, p, w, [{ type: 'hardLanding', sinkRate: 10, speed: 40, groundType: 'runway', damage: 30 }], 1 / 60, null);
+  assert.ok(ms.done, 'runway hard landing must complete');
+  assert.equal(ms.score, 100, 'hard landing scores the base only');
 });
 test('missions: canyon supply drop over zone scores, wrong-way ring rejected', () => {
   const w = createWorld(42); const p = createPlane();
@@ -252,6 +301,14 @@ test('missions: canyon supply drop over zone scores, wrong-way ring rejected', (
   const out2 = updateMission(ms2, p2, w2, [{ type: 'ring', ring: r2, index: 1 }], 1 / 60, null);
   assert.ok(out2.some((o) => o.text === 'WRONG WAY'), 'out-of-order ring must warn');
   assert.equal(ms2.score, 0);
+  // WRONG WAY is throttled by the 2s cooldown (GPT-OSS 120B Fase 5): a second
+  // wrong-way pass inside the window warns nothing; after the window it
+  // warns again. Combo still resets on every wrong-way pass.
+  const out3 = updateMission(ms2, p2, w2, [{ type: 'ring', ring: r2, index: 1 }], 1 / 60, null);
+  assert.ok(!out3.some((o) => o.text === 'WRONG WAY'), 'second pass inside cooldown must not warn');
+  for (let i = 0; i < 130; i++) updateMission(ms2, p2, w2, [], 1 / 60, null);
+  const out4 = updateMission(ms2, p2, w2, [{ type: 'ring', ring: r2, index: 1 }], 1 / 60, null);
+  assert.ok(out4.some((o) => o.text === 'WRONG WAY'), 'pass after cooldown expiry must warn again');
 });
 test('missions: out of bounds >30s fails; fuel-out in flight fails', () => {
   const w = createWorld(42); const p = createPlane(); const ms = createMissionState('rings', w);
@@ -296,6 +353,20 @@ test('effects: explosion spawns 44 particles, cap 400, decay over time', () => {
   assert.equal(fx.texts.length, 1);
   fx.addShake(10); assert.ok(fx.shake > 0);
   fx.update(2); assert.ok(fx.shake < 0.1);
+});
+test('effects: ring burst is sparse (14 sparks) and ring flash is a thin circle', () => {
+  const fx = createEffects(7);
+  fx.spawnRingBurst(0, 50, 0);
+  assert.equal(fx.particles.length, 14, 'burst must stay sparse so the plane stays visible');
+  assert.ok(fx.particles.every((p) => p.kind === 'spark' && p.size <= 1.3), 'sparks small');
+  fx.spawnRingFlash(0, 50, 0, 18);
+  const flash = fx.particles.find((p) => p.kind === 'ringflash');
+  assert.ok(flash, 'ring flash particle exists');
+  assert.equal(flash.size, 18, 'flash radius equals the ring radius');
+  fx.spawnEmbers(0, 50, 0);
+  assert.equal(fx.particles.filter((p) => p.kind === 'fire').length, 6);
+  fx.spawnWheelSmoke(0, 2, 0);
+  assert.equal(fx.particles.filter((p) => p.kind === 'smoke').length, 6);
 });
 test('audio: Node-safe no-ops without AudioContext', () => {
   const a = createAudio();
