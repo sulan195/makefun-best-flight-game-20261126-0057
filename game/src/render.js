@@ -1,5 +1,5 @@
 import { CONFIG } from './config.js';
-import { createRng } from './random.js';
+import { createRng, fbm } from './random.js';
 import { project } from './projection.js';
 import { sampleTerrainGrid } from './world.js';
 import { planeDrawSpec, planeNose } from './aircraft.js';
@@ -23,12 +23,82 @@ const SUN_DIR = (() => {
   return { x: x * inv, y: y * inv, z: z * inv };
 })();
 
-// Deterministic 0..1 hash of a world position — the per-quad colour noise,
-// palm placement and speed-line jitter all derive from it, so a staged
-// screenshot renders identically every run.
+// Deterministic 0..1 hash of a world position — seeded decisions (palm
+// placement, speed-line jitter, wedge/flow selection) all derive from it,
+// so a staged screenshot renders identically every run. It no longer drives
+// per-quad terrain colour: that is smoothVary's job (see below).
 function hash2(x, z) {
   const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
   return s - Math.floor(s);
+}
+
+// Smooth 0..1 colour variation for terrain: one colour "field" spans
+// ~6 quads, so neighbouring quads share a tint and the ground reads as
+// fields instead of a patchwork of tiles. (The old per-quad white-noise
+// hash2 vary gave every quad its own tile — the "kotak" look the entry
+// page showed.) fbm is deterministic for fixed inputs.
+export function smoothVary(x, z) {
+  return fbm(x * 0.0042, z * 0.0042, 3, 77);
+}
+
+// Seeded vertex jitter: displaces a terrain grid vertex by up to ±9 m in
+// x/z. A pure function of the grid coordinates, so the quads sharing a
+// vertex move it identically — no cracks, no shimmer, staged screenshots
+// stay deterministic. Breaks the straight grid lines that made the
+// coastline read as square blocks.
+export function terrainJitter(x, z) {
+  return {
+    x: (hash2(x, z + 11) - 0.5) * 18,
+    z: (hash2(x + 29, z) - 0.5) * 18,
+  };
+}
+
+// How much jitter a world point keeps: 0 on the runway strip (the runway
+// must stay exact — it is drawn as its own strip on top), fading smoothly
+// to 1 about 60 m away from the strip. Distance is measured to the runway
+// rectangle, so the fade is correct at the strip's ends as well as its sides.
+export function runwayJitterFade(x, z, world) {
+  const rw = world && world.runway ? world.runway : null;
+  if (!rw) return 1;
+  const ax = getRunwayAxis(world);
+  const rx = x - rw.cx;
+  const rz = z - rw.cz;
+  const along = rx * ax.dx + rz * ax.dz;
+  const across = rx * -ax.dz + rz * ax.dx;
+  const dAlong = Math.max(0, Math.abs(along) - (rw.len || 420) * 0.5);
+  const dAcross = Math.max(0, Math.abs(across) - (rw.wid || 26) * 0.5);
+  const d = Math.hypot(dAlong, dAcross);
+  const t = Math.max(0, Math.min(1, d / 60));
+  return t * t * (3 - 2 * t);
+}
+
+// Blend two rgb()/hex colours: mixRgb(a, b, 0) = a, mixRgb(a, b, 1) = b.
+export function mixRgb(a, b, t) {
+  const ca = parseColor(a);
+  const cb = parseColor(b);
+  const k = Math.max(0, Math.min(1, t));
+  return `rgb(${Math.round(ca[0] + (cb[0] - ca[0]) * k)},${Math.round(ca[1] + (cb[1] - ca[1]) * k)},${Math.round(ca[2] + (cb[2] - ca[2]) * k)})`;
+}
+
+// Wavy shoreline foam: a coastline edge drawn as a 3-segment polyline with
+// seeded perpendicular offsets, so the waterline reads as a natural shore
+// instead of a straight quad edge. Call inside an open path (moveTo/lineTo
+// only); seed makes it deterministic. Short edges (distant or interior
+// sand/water lace) are skipped, so the foam marks the real coastline
+// instead of scribbling the whole beach.
+export function foamEdge(ctx, x0, y0, x1, y1, seed) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  if (len < 22) return;
+  const px = -dy / len;
+  const py = dx / len;
+  const o1 = (hash2(seed, 5) - 0.5) * 6;
+  const o2 = (hash2(seed, 9) - 0.5) * 6;
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x0 + dx / 3 + px * o1, y0 + dy / 3 + py * o1);
+  ctx.lineTo(x0 + (dx * 2) / 3 + px * o2, y0 + (dy * 2) / 3 + py * o2);
+  ctx.lineTo(x1, y1);
 }
 
 const hazeCache = new Map();
@@ -233,7 +303,7 @@ function getSeededSky(seed) {
     });
   }
   const sparkles = [];
-  for (let i = 0; i < 110; i++) {
+  for (let i = 0; i < 150; i++) {
     const u = nextRand(rng);
     sparkles.push({
       dist: 65 + u * u * 2500,
@@ -365,16 +435,16 @@ function drawSkyAndSea(ctx, cam, cv, world, time, pal, W, H) {
   for (let i = 0; i < skyData.sparkles.length; i++) {
     const sp = skyData.sparkles[i];
     const tw = Math.sin(time * sp.freq + sp.phase) * Math.cos(time * sp.freq * 0.61 + sp.phase * 1.7);
-    if (tw <= 0.14) continue;
+    if (tw <= 0.08) continue;
     const lat = sp.dist * sp.lat;
     tmpPt.x = cam.pos.x + sx * sp.dist + px * lat;
     tmpPt.y = 0;
     tmpPt.z = cam.pos.z + sz * sp.dist + pz * lat;
     const pr = project(cam, tmpPt);
     if (pr.behind || pr.x < 0 || pr.x > W || pr.y < 0 || pr.y > H) continue;
-    const w = Math.min(18, 2.2 + sp.size * (900 / (sp.dist + 160)));
+    const w = Math.min(18, 2.2 + sp.size * (1200 / (sp.dist + 160)));
     const h = Math.max(1.1, w * 0.24);
-    ctx.globalAlpha = Math.min(0.95, (tw - 0.14) * 0.95);
+    ctx.globalAlpha = Math.min(0.95, (tw - 0.08) * 0.95);
     ctx.beginPath();
     ctx.ellipse(pr.x, pr.y, w, h, hz.angle, 0, Math.PI * 2);
     ctx.fill();
@@ -387,7 +457,7 @@ function isWaterType(t) {
 }
 
 function colorForTerrain(type, avgH, slopeDot, pal, volcanoH, vary = 0.5) {
-  // vary (0..1, seeded per quad) breaks the flat single-colour look: the
+  // vary (0..1, smooth field from smoothVary) breaks the flat single-colour look: the
   // same grass/rock reads as varied ground instead of a painted sheet.
   const light = (0.84 + slopeDot * 0.22) * (0.92 + 0.16 * vary);
   const t = String(type || '').toLowerCase();
@@ -397,8 +467,8 @@ function colorForTerrain(type, avgH, slopeDot, pal, volcanoH, vary = 0.5) {
   if (t.includes('volcano') || t.includes('lava') || t.includes('ash') || t.includes('crater')) {
     const hDark = Math.max(0.45, 1.04 - (avgH / (volcanoH || 260)) * 0.52);
     const ember = avgH > (volcanoH || 260) * 0.84 ? (avgH / (volcanoH || 260) - 0.84) * 3.5 : 0;
-    // Warm scoria patchwork: the seeded per-quad variation tints random
-    // quads rust-orange so the cone stops reading as one flat dark mass.
+    // Warm scoria patches: the smooth variation tints patches rust-orange
+    // so the cone stops reading as one flat dark mass.
     return shadeColor(pal.volcano, hDark * light, ember + vary * 0.35);
   }
   if (t.includes('rock') || t.includes('cliff') || t.includes('stone') || avgH > 92) {
@@ -453,9 +523,21 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
       vertWZ[idx] = wz;
       vertType[idx] = tp;
 
-      tmpPt.x = wx;
+      // Organic coastline: jitter the drawn vertex in x/z so quad edges
+      // stop reading as a square grid. Heights and ground types stay
+      // sampled at the true grid point (physics/heightAt untouched); only
+      // the drawn position moves, identically for every quad sharing the
+      // vertex. Fade is 0 on the runway strip, 1 beyond ~60 m from it.
+      const jf = runwayJitterFade(wx, wz, world);
+      if (jf > 0) {
+        const jo = terrainJitter(wx, wz);
+        vertWX[idx] = wx + jo.x * jf;
+        vertWZ[idx] = wz + jo.z * jf;
+      }
+
+      tmpPt.x = vertWX[idx];
       tmpPt.y = wy > 0 ? wy : 0;
-      tmpPt.z = wz;
+      tmpPt.z = vertWZ[idx];
       const pr = project(cam, tmpPt);
       projX[idx] = pr.x;
       projY[idx] = pr.y;
@@ -524,7 +606,7 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
     // the palm/foam decisions below.
     const cxw = (vertWX[i0] + vertWX[i2]) * 0.5;
     const czw = (vertWZ[i0] + vertWZ[i2]) * 0.5;
-    let col = colorForTerrain(domType, avgH, slopeDot, pal, volH, hash2(cxw, czw));
+    let col = colorForTerrain(domType, avgH, slopeDot, pal, volH, smoothVary(cxw, czw));
     // Distance haze: far ground fades toward the sunset sky instead of
     // staying a hard flat colour. Never applied to the runway — it must
     // stay sharp enough to land on.
@@ -558,13 +640,16 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
       const w3 = isWaterType(vertType[i3]);
       if (w0 !== w1 || w1 !== w2 || w2 !== w3 || w3 !== w0) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(255,250,235,0.45)';
+        ctx.strokeStyle = 'rgba(255,250,235,0.3)';
         ctx.lineWidth = 1.6;
         ctx.beginPath();
-        if (w0 !== w1) { ctx.moveTo(projX[i0], projY[i0]); ctx.lineTo(projX[i1], projY[i1]); }
-        if (w1 !== w2) { ctx.moveTo(projX[i1], projY[i1]); ctx.lineTo(projX[i2], projY[i2]); }
-        if (w2 !== w3) { ctx.moveTo(projX[i2], projY[i2]); ctx.lineTo(projX[i3], projY[i3]); }
-        if (w3 !== w0) { ctx.moveTo(projX[i3], projY[i3]); ctx.lineTo(projX[i0], projY[i0]); }
+        // Wavy waterline: each straddling edge is a seeded 3-segment
+        // polyline, so the shore reads as a natural coast, not a straight
+        // quad edge. Seed = the edge's world position (deterministic).
+        if (w0 !== w1) foamEdge(ctx, projX[i0], projY[i0], projX[i1], projY[i1], vertWX[i0] + vertWZ[i0]);
+        if (w1 !== w2) foamEdge(ctx, projX[i1], projY[i1], projX[i2], projY[i2], vertWX[i1] + vertWZ[i1]);
+        if (w2 !== w3) foamEdge(ctx, projX[i2], projY[i2], projX[i3], projY[i3], vertWX[i2] + vertWZ[i2]);
+        if (w3 !== w0) foamEdge(ctx, projX[i3], projY[i3], projX[i0], projY[i0], vertWX[i3] + vertWZ[i3]);
         ctx.stroke();
         ctx.restore();
       }
@@ -601,31 +686,64 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
     const apex = project(cam, tmpPt);
     if (!apex.behind) {
       const segs = 20;
-      const baseR = 320;
+      // The cone's base reaches the terrain cone's own footprint (~560 m),
+      // not 320 m: the old narrow cone ended mid-flank, so its straight
+      // base edge read as a dark cut-out floating above the ground. Each
+      // wedge is now two bands — a dark upper cone to a mid ring at 470 m,
+      // then a foothill skirt to 560 m whose colour blends into the ground
+      // at the base, so the volcano grows out of the land. Where the base
+      // meets the water the shore is dark ROCK, not sand: a low base reads
+      // as rock, so the skirt never paints a tan beach under the cone.
+      const midR = 470;
+      const baseR = 560;
       const wedges = [];
       for (let i = 0; i < segs; i++) {
         const a0 = (i / segs) * Math.PI * 2;
         const a1 = ((i + 1) / segs) * Math.PI * 2;
+        const am = (a0 + a1) * 0.5;
+        const mx0 = vx + Math.cos(a0) * midR;
+        const mz0 = vz + Math.sin(a0) * midR;
+        const my0 = Math.max(0, world.heightAt(mx0, mz0));
+        const mx1 = vx + Math.cos(a1) * midR;
+        const mz1 = vz + Math.sin(a1) * midR;
+        const my1 = Math.max(0, world.heightAt(mx1, mz1));
         const bx0 = vx + Math.cos(a0) * baseR;
         const bz0 = vz + Math.sin(a0) * baseR;
         const by0 = Math.max(0, world.heightAt(bx0, bz0));
         const bx1 = vx + Math.cos(a1) * baseR;
         const bz1 = vz + Math.sin(a1) * baseR;
         const by1 = Math.max(0, world.heightAt(bx1, bz1));
+        tmpPt.x = mx0; tmpPt.y = my0; tmpPt.z = mz0;
+        const m0 = project(cam, tmpPt);
+        tmpPt.x = mx1; tmpPt.y = my1; tmpPt.z = mz1;
+        const m1 = project(cam, tmpPt);
         tmpPt.x = bx0; tmpPt.y = by0; tmpPt.z = bz0;
         const p0 = project(cam, tmpPt);
         tmpPt.x = bx1; tmpPt.y = by1; tmpPt.z = bz1;
         const p1 = project(cam, tmpPt);
-        if (p0.behind || p1.behind) continue;
-        const am = (a0 + a1) * 0.5;
-        const mx = (vx + bx0 + bx1) / 3 - cam.pos.x;
-        const my = (vh + by0 + by1) / 3 - cam.pos.y;
-        const mz = (vz + bz0 + bz1) / 3 - cam.pos.z;
-        const sunShade = 0.68 + 0.34 * (Math.cos(am) * SUN_DIR.x + 0.55 * SUN_DIR.y + Math.sin(am) * SUN_DIR.z);
+        if (m0.behind || m1.behind || p0.behind || p1.behind) continue;
+        const mx3 = (vx + bx0 + bx1) / 3 - cam.pos.x;
+        const my3 = (vh + by0 + by1) / 3 - cam.pos.y;
+        const mz3 = (vz + bz0 + bz1) / 3 - cam.pos.z;
+        // Per-wedge seeded variation so the cone is not one flat dark mass.
+        const sunShade = (0.68 + 0.34 * (Math.cos(am) * SUN_DIR.x + 0.55 * SUN_DIR.y + Math.sin(am) * SUN_DIR.z)) * (0.82 + 0.36 * hash2(i * 7.3, 3.1));
+        // Skirt colour: the ground's own colour at the base, pulled toward
+        // the volcano dark — the foothill where rock meets ground. A base
+        // near sea level is a dark rock shore, never a tan beach.
+        const bxm = (bx0 + bx1) * 0.5;
+        const bzm = (bz0 + bz1) * 0.5;
+        const baseH = (by0 + by1) * 0.5;
+        const skirtType = baseH < 8 ? 'rock' : world.groundType(bxm, bzm);
+        const groundCol = colorForTerrain(skirtType, baseH, 0.4, pal, vh, smoothVary(bxm, bzm));
         wedges.push({
-          d: mx * mx + my * my + mz * mz,
+          idx: i,
+          am,
+          d: mx3 * mx3 + my3 * my3 + mz3 * mz3,
+          m0x: m0.x, m0y: m0.y, m1x: m1.x, m1y: m1.y,
           x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y,
           col: shadeColor(pal.volcano, sunShade, 0.08),
+          skirt: mixRgb(shadeColor(pal.volcano, sunShade, 0.08), groundCol, 0.4),
+          bxm, bzm, bym: baseH,
         });
       }
       wedges.sort((a, b) => b.d - a.d);
@@ -635,11 +753,63 @@ function drawTerrainAndVolcano(ctx, cam, world, pal, W, H, time) {
         ctx.strokeStyle = w.col;
         ctx.beginPath();
         ctx.moveTo(apex.x, apex.y);
-        ctx.lineTo(w.x0, w.y0);
-        ctx.lineTo(w.x1, w.y1);
+        ctx.lineTo(w.m0x, w.m0y);
+        ctx.lineTo(w.m1x, w.m1y);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
+        ctx.fillStyle = w.skirt;
+        ctx.strokeStyle = w.skirt;
+        ctx.beginPath();
+        ctx.moveTo(w.m0x, w.m0y);
+        ctx.lineTo(w.m1x, w.m1y);
+        ctx.lineTo(w.x1, w.y1);
+        ctx.lineTo(w.x0, w.y0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      // Lava flows: a few seeded wedges carry a warm flow from below the
+      // crater down the flank, so the volcano reads as ALIVE and the dark
+      // mass breaks up. Each flow is a tapered triangle on the cone's
+      // mid-angle ray (a straight cone generator, so points on the ray sit
+      // on the surface), widened ±9 m at its foot.
+      for (let i = 0; i < wedges.length; i++) {
+        const w = wedges[i];
+        if (hash2(w.idx * 13.7, 9.2) <= 0.65) continue;
+        const surf = (r) => {
+          const t = r / baseR;
+          return {
+            x: vx + (w.bxm - vx) * t,
+            y: vh + (w.bym - vh) * t,
+            z: vz + (w.bzm - vz) * t,
+          };
+        };
+        const top = surf(120);
+        const foot = surf(470);
+        const px = -Math.sin(w.am);
+        const pz = Math.cos(w.am);
+        const tl = { x: top.x + px * 6, y: top.y, z: top.z + pz * 6 };
+        const tr = { x: top.x - px * 6, y: top.y, z: top.z - pz * 6 };
+        const bl = { x: foot.x + px * 18, y: foot.y, z: foot.z + pz * 18 };
+        const br = { x: foot.x - px * 18, y: foot.y, z: foot.z - pz * 18 };
+        tmpPt.x = tl.x; tmpPt.y = tl.y; tmpPt.z = tl.z;
+        const ptl = project(cam, tmpPt);
+        tmpPt.x = tr.x; tmpPt.y = tr.y; tmpPt.z = tr.z;
+        const ptr = project(cam, tmpPt);
+        tmpPt.x = bl.x; tmpPt.y = bl.y; tmpPt.z = bl.z;
+        const pl = project(cam, tmpPt);
+        tmpPt.x = br.x; tmpPt.y = br.y; tmpPt.z = br.z;
+        const pr = project(cam, tmpPt);
+        if (ptl.behind || ptr.behind || pl.behind || pr.behind) continue;
+        ctx.fillStyle = shadeColor(pal.lava, 1.0, 0.5);
+        ctx.beginPath();
+        ctx.moveTo(ptl.x, ptl.y);
+        ctx.lineTo(ptr.x, ptr.y);
+        ctx.lineTo(pr.x, pr.y);
+        ctx.lineTo(pl.x, pl.y);
+        ctx.closePath();
+        ctx.fill();
       }
       ctx.fillStyle = '#ff6422';
       ctx.beginPath();

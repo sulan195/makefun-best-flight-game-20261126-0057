@@ -15,6 +15,7 @@
 import { createRng, range, pick } from './random.js';
 
 const MAX_PARTICLES = 400;
+const MAX_TEXTS = 200;
 const MAX_SHAKE = 24;
 const TEXT_LIFETIME = 1.2;
 
@@ -115,11 +116,13 @@ export function createEffects(seed = 2026) {
     });
   }
 
-  // The ring's own celebration: one thin glowing circle, the size of the
-  // ring itself, that expands slightly and fades. Drawn as a stroked circle
-  // (kind 'ringflash'), so it can never blob over the plane the way a
-  // particle cloud did. size is the ring's world radius; the renderer
-  // scales it by perspective like any other particle.
+  // The ring's own celebration: one thin glowing circle, slightly SMALLER
+  // than the ring itself, that expands slightly and fades. Drawn as a
+  // stroked circle (kind 'ringflash'), so it can never blob over the plane
+  // the way a particle cloud did. (Revision 2026-11-27/2128: the old flash
+  // was drawn at full ring radius + 35% growth, so its gold halo towered
+  // over the green ring and swallowed the frame in the rings shot — now
+  // 0.85x radius, 12% growth, thinner and dimmer, sitting inside the ring.)
   function spawnRingFlash(x, y, z, ringRadius) {
     const life = 0.55;
     pushParticle({
@@ -127,11 +130,11 @@ export function createEffects(seed = 2026) {
       vel: { x: 0, y: 0, z: 0 },
       life,
       maxLife: life,
-      size: typeof ringRadius === 'number' && ringRadius > 0 ? ringRadius : 18,
+      size: typeof ringRadius === 'number' && ringRadius > 0 ? ringRadius * 0.85 : 18,
       color: '#ffd166',
       kind: 'ringflash',
       gravity: 0,
-      grow: 0.35,
+      grow: 0.12,
     });
   }
 
@@ -245,7 +248,11 @@ export function createEffects(seed = 2026) {
   }
 
   function addShake(amount) {
-    fx.shake = Math.max(0, Math.min(MAX_SHAKE, fx.shake + (typeof amount === 'number' ? amount : 0)));
+    // NaN passes a typeof check, so guard with isFinite: a NaN shake would
+    // poison fx.shake and every shakeOffset afterwards. Callers pass
+    // literals today; this is defence, not a live bug (120B 2128 #13).
+    const inc = Number.isFinite(amount) ? amount : 0;
+    fx.shake = Math.max(0, Math.min(MAX_SHAKE, fx.shake + inc));
   }
 
   // Floating score text in SCREEN coordinates (the caller projects the
@@ -254,6 +261,9 @@ export function createEffects(seed = 2026) {
   // for the ring popup so it stays readable on the judge's small cells.
   function addText(x, y, text, color, size) {
     if (typeof text !== 'string' || text.trim() === '') return;
+    // Cap the list: texts expire in update(), but a pathological burst
+    // must never grow it without bound (120B 2128 #15). Oldest goes first.
+    if (texts.length >= MAX_TEXTS) texts.splice(0, texts.length - MAX_TEXTS + 1);
     texts.push({
       x: typeof x === 'number' ? x : 0,
       y: typeof y === 'number' ? y : 0,
@@ -316,20 +326,47 @@ export function createEffects(seed = 2026) {
       let radius = p.size * scale;
       if (p.grow) radius *= 1 + (1 - remaining) * p.grow;
       if (radius < 0.4) continue;
-      // Ring flash: a thin stroked circle at the ring's own radius, never a
-      // filled blob — it frames the pass without covering the plane.
+      // Ring flash: a thin stroked circle at just under the ring's own
+      // radius, never a filled blob — it frames the pass without covering
+      // the plane or towering over the ring.
       if (p.kind === 'ringflash') {
-        ctx.globalAlpha = remaining * 0.85;
+        ctx.globalAlpha = remaining * 0.55;
         ctx.strokeStyle = p.color;
-        ctx.lineWidth = Math.max(1.5, radius * 0.09);
+        ctx.lineWidth = Math.max(1.5, radius * 0.06);
         ctx.beginPath();
         ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.globalAlpha = remaining * 0.22;
-        ctx.lineWidth = Math.max(3, radius * 0.22);
+        ctx.globalAlpha = remaining * 0.12;
+        ctx.lineWidth = Math.max(3, radius * 0.14);
         ctx.beginPath();
         ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
         ctx.stroke();
+        continue;
+      }
+      // Ring sparks fly as short STREAKS along their velocity, not soap
+      // bubbles: a burst of circles clumped into a pastel smudge that hid
+      // the plane in the rings shot. The streak's tail is the particle's
+      // position 0.045 s ago, projected the same way as its head.
+      if (p.kind === 'spark') {
+        const tail = project(cam, {
+          x: p.pos.x - p.vel.x * 0.045,
+          y: p.pos.y - p.vel.y * 0.045,
+          z: p.pos.z - p.vel.z * 0.045,
+        });
+        if (tail && Number.isFinite(tail.x) && Number.isFinite(tail.y)) {
+          ctx.globalAlpha = remaining * 0.9;
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = Math.max(1, radius * 0.55);
+          ctx.beginPath();
+          ctx.moveTo(screen.x, screen.y);
+          ctx.lineTo(tail.x, tail.y);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = remaining;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, Math.max(0.4, radius * 0.45), 0, Math.PI * 2);
+        ctx.fill();
         continue;
       }
       ctx.globalAlpha = p.kind === 'smoke' ? remaining * 0.45 : remaining * 0.9;
@@ -337,13 +374,6 @@ export function createEffects(seed = 2026) {
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
       ctx.fill();
-      if (p.kind === 'spark') {
-        ctx.globalAlpha = remaining;
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.arc(screen.x, screen.y, Math.max(0.4, radius * 0.45), 0, Math.PI * 2);
-        ctx.fill();
-      }
     }
     ctx.globalAlpha = 1;
     if (texts.length > 0) {

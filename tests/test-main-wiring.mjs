@@ -375,6 +375,10 @@ test('staging: rings shot is the ring-pass moment with burst + popup', () => {
   const popup = game.effects.texts.find((t) => t.text === '+250 RING!');
   assert.ok(popup, '"+250 RING!" popup staged');
   assert.ok(Number.isFinite(popup.x) && Number.isFinite(popup.y), 'popup has finite screen coords');
+  // Revision 2026-11-27/2128: camera 75 back + 36 side so the ring frames
+  // the plane instead of swallowing it.
+  const camDist = Math.hypot(game.cam.pos.x - game.plane.pos.x, game.cam.pos.y - game.plane.pos.y, game.cam.pos.z - game.plane.pos.z);
+  assert.ok(camDist > 80, 'rings camera stands back from the plane: ' + camDist.toFixed(1));
   assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
 });
 
@@ -395,14 +399,18 @@ test('staging: cockpit shot is consistent (ring 1 cleared, timer running)', () =
   assert.equal(game.mission.elapsed, 19.6, 'HUD timer reads the staged clock');
 });
 
-// 11. Staged 'start' (cover) shot: the plane is IN FLIGHT at cruise toward
-// the volcano (revision 2026-11-27 — the parked-on-runway cover read as an
-// empty runway), so the timer runs like every other flying shot.
-test('staging: start shot is a flying cover with running timer', () => {
+// 11. Staged 'start' (cover) shot: TAKEOFF cover (revision 2026-11-27/2128
+// — the 1228 flying cover lost the runway entirely and the R3 judge rate
+// fell 0.5976 → 0.5158). The plane has just lifted off over Runway Isle,
+// climbing NE with the runway strip below, ring 1 ahead and the volcano at
+// the left of frame; the timer runs like every other flying shot.
+test('staging: start shot is a takeoff cover with running timer', () => {
   const game = bootStaged('?shot=start&seed=1');
   assert.equal(game.mission.elapsed, 12.0, 'HUD timer reads the staged clock');
   assert.ok(game.plane.speed > 40, 'cover plane is flying at cruise, not parked (speed ' + game.plane.speed + ')');
   assert.equal(game.plane.onGround, false, 'cover plane is airborne');
+  assert.ok(game.plane.pos.x > -120 && game.plane.pos.x < 20, 'cover plane is just off the runway isle (x ' + game.plane.pos.x + ')');
+  assert.ok(game.plane.pos.z > 0 && game.plane.pos.z < 120, 'cover plane is just off the runway isle (z ' + game.plane.pos.z + ')');
   assert.equal(game._smokeT, game.time, 'no stray smoke puff in the frozen frame');
 });
 

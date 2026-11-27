@@ -14,7 +14,7 @@ import { MISSIONS, createMissionState, updateMission, missionObjectiveText } fro
 import { createAudio } from '../game/src/audio.js';
 import { createEffects } from '../game/src/effects.js';
 import { applyShot, stageShot, SHOT_LIST } from '../game/src/shots.js';
-import { getRunwayAxis } from '../game/src/render.js';
+import { getRunwayAxis, smoothVary, terrainJitter, runwayJitterFade, mixRgb } from '../game/src/render.js';
 
 let passed = 0;
 let failed = 0;
@@ -362,7 +362,10 @@ test('effects: ring burst is sparse (14 sparks) and ring flash is a thin circle'
   fx.spawnRingFlash(0, 50, 0, 18);
   const flash = fx.particles.find((p) => p.kind === 'ringflash');
   assert.ok(flash, 'ring flash particle exists');
-  assert.equal(flash.size, 18, 'flash radius equals the ring radius');
+  // Revision 2026-11-27/2128: the flash sits just INSIDE the ring (0.85x)
+  // so its halo no longer towers over the ring in the rings shot.
+  approx(flash.size, 18 * 0.85, 1e-9);
+  assert.ok(flash.grow <= 0.15, 'flash grows only slightly (was 0.35)');
   fx.spawnEmbers(0, 50, 0);
   assert.equal(fx.particles.filter((p) => p.kind === 'fire').length, 6);
   fx.spawnWheelSmoke(0, 2, 0);
@@ -420,6 +423,56 @@ test('render: getRunwayAxis returns a unit-ish direction', () => {
   const ax = getRunwayAxis(w);
   const len = Math.hypot(ax.dx, ax.dz);
   approx(len, 1, 0.01);
+});
+test('render: terrain jitter is deterministic, bounded, and zero on the runway', () => {
+  const a = terrainJitter(-60, 60);
+  const b = terrainJitter(-60, 60);
+  assert.deepEqual(a, b, 'same grid point jitters identically (no cracks)');
+  assert.ok(Math.abs(a.x) <= 9 && Math.abs(a.z) <= 9, 'jitter bounded to ±9 m: ' + JSON.stringify(a));
+  const c = terrainJitter(400, -300);
+  assert.ok(a.x !== c.x || a.z !== c.z, 'different points jitter differently');
+  const w = createWorld(1);
+  assert.equal(runwayJitterFade(0, 0, w), 0, 'runway centre keeps no jitter');
+  assert.equal(runwayJitterFade(100, 0, w), 0, 'on the strip, still no jitter');
+  assert.equal(runwayJitterFade(1000, 1000, w), 1, 'far from the runway, full jitter');
+  const f = runwayJitterFade(0, 40, w);
+  assert.ok(f > 0 && f < 1, 'fade is smooth at the strip edge: ' + f);
+});
+test('render: smooth colour vary is smooth across neighbouring quads', () => {
+  for (const [x, z] of [[0, 0], [400, -300], [-800, 500]]) {
+    const v = smoothVary(x, z);
+    assert.ok(v >= 0 && v <= 1, 'vary in [0,1]: ' + v);
+    const next = smoothVary(x + 40, z);
+    assert.ok(Math.abs(next - v) < 0.2, 'neighbouring quads share a tint (no patchwork): ' + v + ' vs ' + next);
+  }
+  let lo = 1, hi = 0;
+  for (let x = -800; x <= 800; x += 160) for (let z = -800; z <= 800; z += 160) {
+    const v = smoothVary(x, z); lo = Math.min(lo, v); hi = Math.max(hi, v);
+  }
+  assert.ok(hi - lo > 0.3, 'vary is not constant across the map: ' + lo + '..' + hi);
+});
+test('render: mixRgb blends endpoints exactly', () => {
+  assert.equal(mixRgb('#000000', '#ffffff', 0), 'rgb(0,0,0)');
+  assert.equal(mixRgb('#000000', '#ffffff', 1), 'rgb(255,255,255)');
+  assert.equal(mixRgb('#000000', '#ffffff', 0.5), 'rgb(128,128,128)');
+});
+test('shots: takeoff cover frames runway, ring 1 and volcano (revision 2128)', () => {
+  const game = {};
+  applyShot(game, '?shot=start&seed=1');
+  assert.ok(game.plane.speed > 40, 'cover plane is flying at cruise');
+  assert.equal(game.plane.onGround, false, 'cover plane is airborne');
+  const cam = game.cam;
+  const inFrame = (p) => {
+    const pr = project(cam, p);
+    return !pr.behind && pr.x >= 0 && pr.x <= 1280 && pr.y >= 0 && pr.y <= 720;
+  };
+  assert.ok(inFrame({ x: 0, y: 6, z: 0 }), 'runway centre is in the cover frame');
+  assert.ok(inFrame(game.world.rings[0]), 'ring 1 is in the cover frame');
+  assert.ok(inFrame({ x: 600, y: 260, z: -900 }), 'volcano apex is in the cover frame');
+  assert.ok(inFrame(game.plane.pos), 'plane is in the cover frame');
+  // Camera stays out of the ground on the low climb.
+  const ground = game.world.heightAt(cam.pos.x, cam.pos.z);
+  assert.ok(cam.pos.y > ground + 2, 'camera above terrain: ' + cam.pos.y + ' vs ' + ground);
 });
 
 // ---------- benchmark ----------

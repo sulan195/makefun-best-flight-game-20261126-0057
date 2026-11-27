@@ -58,6 +58,49 @@ juri membaca contact sheet screenshot + outline sumber, jadi screenshot adalah m
   (c) tidak ada regresi wiring lama (event array, popup, touchdown, flaps/gear); (d) kamera
   staged shot deterministik (tidak ada Math.random tak-seeded di jalur render staged).
 
+## REVISI 2026-11-27 (siklus 2128, slot 2) — mohon verifikasi khusus bagian ini
+Alasan revisi: Ronde 3 (dijudge 27 Nov 20:28 WIB): skor TURUN 0,597597 → 0,515826, peringkat
+2333/17578, di luar zona top-50. Masukan user 16:43 WIB dari screenshot halaman entri:
+(1) gunung melayang — kerucut visual (base radius 320) jauh lebih kecil dari kerucut terrain
+(~675), jahitan kerucut-vs-quad berupa garis lurus; (2) daratan berbentuk kotak — grid
+48×48 quads STEP 40 m + variasi warna white-noise hash2 (±8%) = patchwork persegi.
+Perubahan (hanya render.js, effects.js, shots.js + tes):
+- render.js: `terrainJitter(x,z)` ±9 m per sumbu, fungsi murni koordinat grid (sudut bersama
+  antar-quad mendapat jitter sama → tidak ada retak/T-junction), difade ke 0 di strip runway
+  (smoothstep 60 m dari persegi runway via getRunwayAxis); tinggi + groundType tetap dari
+  titik grid asli. `smoothVary(x,z)` = fbm(x*0.0042, z*0.0042, 3, 77) menggantikan hash2
+  per-quad (satu field warna ~6 quad). Foam: garis lurus tepi quad → `foamEdge` polyline
+  3 segmen + offset tegak lurus seeded ±3 px, alpha 0,30, tepi layar <22 px dilewati
+  (foam hanya menandai garis pantai nyata, bukan menggaris-garis seluruh pantai).
+- render.js gunung: baseR 320 → 560, midR 470; tiap wedge = segitiga atas (apex→mid)
+  warna volcano + variasi per-wedge (0,82 + 0,36*hash2) + skirt quad (mid→base) warna
+  mixRgb(volcanoShade, groundCol, 0,4); groundCol = warna terrain di base, TETAPI bila
+  baseH < 8 m dipakai tipe 'rock' (pantai gunung berbatu gelap, bukan pasir tan).
+  Aliran lava: wedge hash2(idx*13.7, 9.2) > 0,65 → trapesium dari r=120 (±6 m) ke r=470
+  (±18 m), warna shadeColor(pal.lava, 1.0, 0.5), di atas generator kerucut lurus.
+- render.js langit/laut: sparkles 110 → 150, gerbang twinkle 0,14 → 0,08, faktor lebar 900 → 1200.
+- effects.js: spawnRingFlash size = ringRadius*0.85 (was 1.0x), grow 0.35 → 0.12; draw
+  ringflash alpha 0.85→0.55 / width 0.09→0.06, halo 0.22→0.12 / 0.22→0.14; spark digambar
+  sebagai STREAK (garis posisi → posisi − vel*0.045, diproyeksikan) + titik putih kepala.
+- shots.js: cover 'start' re-stage ke TAKEOFF — pesawat (-60,42,60), arah (0.7,0.05,-0.7),
+  cruise 55, throttle 0.8, kamera 19 m + 5.5, pitch -0.08, + clamp minCamY sesudah override.
+  Geometri terverifikasi probe: runway centre (640,519), ring 1 (824,324), volcano apex
+  (545,223), pesawat (640,465) dalam frame 1280×720. Shot 'rings': kamera 62→75 mundur,
+  30→36 samping.
+- Tes: test.mjs 36/36 + test-main-wiring.mjs 13/13 lolos, termasuk tes baru: jitter
+  deterministik/terbatas/nol di runway, smooth vary halus (<0.2 antar quad bertetangga,
+  rentang >0.3 se-peta), mixRgb endpoint, cover framing (runway centre + ring 1 + volcano
+  apex + pesawat dalam frame), jarak kamera rings >80. Render headless 4 screenshot
+  1280×721, masing-masing ≤256 KiB, diinspeksi visual: gunung menapak (skirt rock gelap),
+  pantai organik (foam halus), cover takeoff (runway + ring + gunung), shot 3 (ring
+  membingkai pesawat, flash halus, streak).
+- Verifikasi yang diminta atas revisi: (a) jitter tidak bisa membalik quad (batas ±9 m <
+  STEP/2, fade runway benar-benar 0 di strip); (b) skirt gunung tidak menimpa runway/
+  ring/lautan secara salah (base 560 vs radius terrain ~675); (c) lava flow tidak bocor
+  ke luar kerucut; (d) foamEdge tidak pernah throw (len 0) dan tidak menggambar di luar
+  frame; (e) tidak ada regresi wiring lama (event array, popup, touchdown, flaps/gear,
+  combo/storm 1228); (f) staged shot deterministik (tidak ada Math.random tak-seeded).
+
 ## Yang diminta
 Keluarkan temuan TERSTRUKTUR (severity: Kritis/Tinggi/Sedang/Rendah; file; lokasi; isu; bukti;
 saran). Verifikasi: (a) kebenaran kode terhadap kriteria juri & aturan kit di atas;

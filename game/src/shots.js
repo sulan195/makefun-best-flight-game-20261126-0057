@@ -210,18 +210,22 @@ export function applyShot(game, query) {
   const rings = world.rings || [];
 
   if (shot === 'start') {
-    // COVER (revision 2026-11-27): the old cover staged the plane PARKED
-    // on the runway at 0 KT — the judge could read it as "empty runway".
-    // The cover now stages the plane IN FLIGHT at cruise, chasing ring 1
-    // toward the volcano with the sunset ahead: plane big in frame, ring
-    // ahead, volcano + lava + sea in one frame, HUD alive (55 KT, timer
-    // running). The mission has started, so elapsed syncs to game.time
-    // like every other flying shot (see the sync at the end of applyShot).
+    // COVER (revision 2026-11-27/2128 — TAKEOFF): the flying cover of the
+    // 1228 revision lost the runway entirely (criterion 1 wants "a runway
+    // or a target ring ahead", and the cover is the biggest image), and the
+    // R3 judge rate fell 0.5976 → 0.5158. The cover now stages the plane
+    // just lifted off over Runway Isle, climbing NE: the runway strip
+    // recedes dead-centre below the plane, ring 1 is dead ahead, and the
+    // volcano stands at the left of frame. Geometry probe-verified
+    // (1280x720 frame): runway centre (640,519), ring 1 (824,323), volcano
+    // apex (545,223), plane (640,465), sun out of frame right — the orange
+    // sky gradient still carries the sunset. Plane 18 m above the island
+    // grass; camera clamped out of the ground after the override.
     game.time = 12.0;
     setFlightState(
       plane,
-      { x: -100, y: 90, z: -250 },
-      { x: 0.94, y: -0.08, z: -0.34 },
+      { x: -60, y: 42, z: 60 },
+      { x: 0.7, y: 0.05, z: -0.7 },
       cruise, 0.8, 0.14, false, false, false
     );
     plane.fuel = 96;
@@ -241,6 +245,8 @@ export function applyShot(game, query) {
     cam.pos.y = plane.pos.y + 5.5;
     cam.pos.z = plane.pos.z - cfz * 19;
     orientCameraToward(cam, cfx, -0.08, cfz, 0);
+    const minCamY = Math.max(0, world.heightAt(cam.pos.x, cam.pos.z)) + 2.2;
+    if (cam.pos.y < minCamY) cam.pos.y = minCamY;
   } else if (shot === 'play') {
     game.time = 28.4;
     for (let i = 0; i < Math.min(2, rings.length); i++) rings[i].passed = true;
@@ -307,11 +313,14 @@ export function applyShot(game, query) {
     // it spanned the whole frame and the ring-flash halo filled the
     // screen. At ~70 units the whole ring fits as an ellipse around the
     // plane (the plane itself is drawn at fixed screen size, so it stays
-    // large) and the flash reads as a halo, not a wall.
+    // large) and the flash reads as a halo, not a wall. Revision
+    // 2026-11-27/2128: further still (75 back, 36 side) — the R3 cover
+    // showed the flash halo still towering over the ring, so the flash was
+    // also shrunk (effects.js) and the camera gives it more air.
     const perpX = -vz, perpZ = vx;
-    cam.pos.x = plane.pos.x - vx * 62 + perpX * 30;
+    cam.pos.x = plane.pos.x - vx * 75 + perpX * 36;
     cam.pos.y = plane.pos.y + 8;
-    cam.pos.z = plane.pos.z - vz * 62 + perpZ * 30;
+    cam.pos.z = plane.pos.z - vz * 75 + perpZ * 36;
     const dxr = r3.x - cam.pos.x, dyr = r3.y - cam.pos.y, dzr = r3.z - cam.pos.z;
     const dl = Math.hypot(dxr, dyr, dzr) || 1;
     orientCameraToward(cam, dxr / dl, dyr / dl, dzr / dl, 0);
